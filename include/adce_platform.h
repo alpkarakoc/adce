@@ -5,14 +5,6 @@
 extern "C" {
 #endif
 
-#if !defined(__linux__)
-#error "ADCE requires Linux (CLOCK_MONOTONIC_RAW and getrandom() are Linux-specific)"
-#endif
-
-#if !defined(__x86_64__)
-#error "ADCE requires the x86_64 architecture (64-Byte L1D cache line, CMPXCHG8B lock-free U64 guarantee)"
-#endif
-
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
 #error "ADCE requires a C11 (or later) compiler"
 #endif
@@ -23,34 +15,120 @@ extern "C" {
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+/* ===========================================================================
+ * Platform abstraction.
+ *
+ * This is the ONLY architecture- or OS-conditional block in the codebase.
+ * Everything below it is written against exactly three macros:
+ *
+ *   ADCE_CACHELINE           false-sharing granule in bytes
+ *   ADCE_CPU_RELAX()         spin-wait hint for the seqlock retry loop
+ *   ADCE_GET_ENTROPY(b, n)   fill n bytes of b; 0 on success, -1 on failure
+ *
+ * Shipping target is Linux x86_64. arm64 is supported because its weak memory
+ * model is a stricter test of the seqlock than x86_64's TSO: code that passes
+ * on arm64 passes on x86_64, and the reverse does not hold. An #error here
+ * means the target genuinely lacks one of these primitives, not merely that
+ * it is not the shipping target.
+ * ===========================================================================
+ */
+
+#if defined(__x86_64__) || defined(__amd64__)
+
+#define ADCE_CACHELINE ((size_t)64U)
+#define ADCE_CPU_RELAX() __builtin_ia32_pause()
+
+#elif defined(__aarch64__) || defined(__arm64__)
+
+/* 128, not 64: Apple M-series and Neoverse cores fetch and stripe on a
+ * 128-byte granule, so a 64-byte-padded object still false-shares. */
+#define ADCE_CACHELINE ((size_t)128U)
+#define ADCE_CPU_RELAX() __asm__ __volatile__("yield")
+
+#else
+#error "ADCE supports x86_64 and arm64 only: no cache-line width or CPU-relax primitive is defined for this architecture"
+#endif
+
+#if defined(__linux__)
+
 #include <sys/random.h>
+
+/* getrandom() returns short on signal delivery. A short fill is a silently
+ * weakened seed, so loop to completion and report failure rather than
+ * handing back a byte count the caller has to remember to check. */
+static inline int adce_platform_get_entropy(void *buf, size_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0;
+
+    while (got < len) {
+        ssize_t r = getrandom(p + got, len - got, 0);
+        if (r < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (r == 0) {
+            return -1;
+        }
+        got += (size_t)r;
+    }
+
+    return 0;
+}
+
+#elif defined(__APPLE__)
+
+#include <sys/random.h>
+
+/* getentropy() is all-or-nothing per call but refuses any request over 256
+ * bytes, so the chunking loop is mandatory, not defensive. */
+static inline int adce_platform_get_entropy(void *buf, size_t len) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0;
+
+    while (got < len) {
+        size_t chunk = len - got;
+        if (chunk > 256U) {
+            chunk = 256U;
+        }
+        if (getentropy(p + got, chunk) != 0) {
+            return -1;
+        }
+        got += chunk;
+    }
+
+    return 0;
+}
+
+#else
+#error "ADCE requires a kernel entropy syscall: getrandom() (Linux) or getentropy() (macOS)"
+#endif
+
+#define ADCE_GET_ENTROPY(buf, len) adce_platform_get_entropy((buf), (len))
 
 /* ===========================================================================
  * Hardware profile
  * ===========================================================================
  */
 
-#define ADCE_CACHE_LINE_SIZE ((size_t)64U)
-#define ADCE_ALIGNED _Alignas(ADCE_CACHE_LINE_SIZE)
-
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
                "64-bit atomics must be always-lock-free on this target");
 _Static_assert(sizeof(_Atomic uint64_t) == sizeof(uint64_t),
                "atomic uint64_t must not carry hidden lock-object overhead");
 
-static inline void adce_cpu_relax(void) {
-    __builtin_ia32_pause();
-}
-
 /* ===========================================================================
  * Time source: CLOCK_MONOTONIC_RAW only. CLOCK_REALTIME and CLOCK_MONOTONIC
  * are prohibited project-wide to eliminate NTP slew as an attack surface on
- * window/timeout arithmetic.
+ * window/timeout arithmetic. Available on Linux and on macOS 10.12+, so no
+ * fallback clock is defined.
  * ===========================================================================
  */
 
@@ -140,8 +218,9 @@ static inline int adce_token_try_take(uint64_t *tokens_q16, uint64_t cost_q16) {
 
 /* ===========================================================================
  * Per-thread xorshift128+ PRNG. Zero-allocation, lock-free, seeded once per
- * thread from getrandom(). libc rand()/random() are banned: their internal
- * state is protected by a lock, which is inadmissible on the hot path.
+ * thread from the kernel entropy source behind ADCE_GET_ENTROPY. libc
+ * rand()/random() are banned: their internal state is protected by a lock,
+ * which is inadmissible on the hot path.
  * ===========================================================================
  */
 
@@ -154,17 +233,12 @@ static _Thread_local adce_rng_state_t adce_rng_tls = {{0, 0}, 0};
 
 static inline void adce_rng_seed(adce_rng_state_t *rng) {
     uint8_t buf[16];
-    size_t got = 0;
 
-    while (got < sizeof(buf)) {
-        ssize_t r = getrandom(buf + got, sizeof(buf) - got, 0);
-        if (r < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            abort();
-        }
-        got += (size_t)r;
+    /* Fail-closed. A PRNG seeded from a failed or partial entropy draw is
+     * predictable, and every stochastic containment decision downstream
+     * inherits that; there is deliberately no degraded seeding path. */
+    if (ADCE_GET_ENTROPY(buf, sizeof(buf)) != 0) {
+        abort();
     }
 
     memcpy(rng->state, buf, sizeof(rng->state));
@@ -231,7 +305,7 @@ static inline uint64_t adce_seqlock_read_begin(const adce_seq_t *seq) {
     do {
         s = atomic_load_explicit(seq, memory_order_acquire);
         if (s & 1U) {
-            adce_cpu_relax();
+            ADCE_CPU_RELAX();
         }
     } while (s & 1U);
     return s;
@@ -255,17 +329,17 @@ static inline int adce_seqlock_read_retry(const adce_seq_t *seq, uint64_t start)
  * 6.7.5p2); placing it on the first member instead forces the struct's own
  * alignment up to a full cache line. */
 typedef struct {
-    _Alignas(ADCE_CACHE_LINE_SIZE) adce_seq_t sequence;
+    _Alignas(ADCE_CACHELINE) adce_seq_t sequence;
     adce_q16_t pressure;
     uint64_t epoch_id;
     uint64_t observed_at_ns;
-    uint8_t _reserved[ADCE_CACHE_LINE_SIZE - sizeof(adce_seq_t) -
+    uint8_t _reserved[ADCE_CACHELINE - sizeof(adce_seq_t) -
                        sizeof(adce_q16_t) - sizeof(uint64_t) - sizeof(uint64_t)];
 } adce_epoch_state_t;
 
-_Static_assert(sizeof(adce_epoch_state_t) == ADCE_CACHE_LINE_SIZE,
+_Static_assert(sizeof(adce_epoch_state_t) == ADCE_CACHELINE,
                "adce_epoch_state_t must occupy exactly one cache line");
-_Static_assert(_Alignof(adce_epoch_state_t) == ADCE_CACHE_LINE_SIZE,
+_Static_assert(_Alignof(adce_epoch_state_t) == ADCE_CACHELINE,
                "adce_epoch_state_t must be cache-line aligned");
 
 static inline void adce_epoch_publish(adce_epoch_state_t *state,
