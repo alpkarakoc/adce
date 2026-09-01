@@ -43,3 +43,6 @@ publication path.
 - Present changes as diffs or complete file overrides.
 - If a request violates a locked decision above, halt, state the risk, and propose the
   corrected design before writing code.
+- `scripts/verify.sh` and the files under `scripts/hooks/` are the verification gate.
+  Never modify them in the same commit as the code they check. A gate change is proposed
+  first, with its reason, and lands in its own commit.
