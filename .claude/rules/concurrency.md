@@ -5,20 +5,22 @@ paths:
   - "test/**/*.c"
 ---
 
-# ADCE eşzamanlılık kuralları
+# ADCE concurrency rules
 
-- C11 bellek modelinde veri yarışı tanımsız davranıştır. Seqlock bunun istisnası DEĞİLDİR.
-  Eşzamanlı erişilen her payload alanı `_Atomic` olmalı ve `memory_order_relaxed` ile
-  okunup yazılmalıdır.
-- Seqlock yazar: seq artır (release) -> payload (relaxed) -> seq artır (release).
-  Seqlock okuyucu: seq oku (acquire) -> payload (relaxed) ->
-  `atomic_thread_fence(memory_order_acquire)` -> seq'i yeniden oku ve karşılaştır.
-- Doğru yazılmış bir seqlock TSan altında TEMİZDİR. TSan raporu çıkıyorsa protokol
-  eksiktir. Suppression dosyası yazmak yasaktır; sorunu bellek düzeninde çöz.
-- Mutex, spinlock, malloc/free yayın yolunda (publish path) yasaktır.
-- Zaman kaynağı yalnızca `CLOCK_MONOTONIC_RAW`. `CLOCK_REALTIME` geriye atlar.
-- Yayın nesnesi tam olarak bir 64 baytlık cache line; `_Alignas` ilk üyeye uygulanır
-  (C11 §6.7.5p2 typedef üzerinde `_Alignas`'ı yasaklar), boyut `_Static_assert` ile sabitlenir.
-- Q16.16 aritmetiğinde ara çarpımlar `int64_t`'ye genişletilir, taşma sınırda test edilir.
-- Yeni davranış, testiyle aynı commit'te gelir. `./scripts/verify.sh` üç profilde de yeşil
-  olmadan iş bitmiş sayılmaz.
+- A data race is undefined behaviour in the C11 memory model. A seqlock is NOT an
+  exception. Every payload field read concurrently with a write must be `_Atomic` and
+  accessed with `memory_order_relaxed`.
+- Seqlock writer: increment seq (release) -> write payload (relaxed) -> increment seq
+  (release).
+  Seqlock reader: read seq (acquire) -> read payload (relaxed) ->
+  `atomic_thread_fence(memory_order_acquire)` -> re-read seq and compare.
+- A correctly written seqlock is clean under ThreadSanitizer. A TSan report means the
+  protocol is incomplete, not that TSan is wrong. Writing a suppression file is forbidden.
+- No mutex, spinlock, malloc, or free on the publication path.
+- Time source is `CLOCK_MONOTONIC_RAW` only. `CLOCK_REALTIME` can step backwards.
+- The publication object occupies exactly one `ADCE_CACHELINE`. `_Alignas` goes on the
+  first member (C11 §6.7.5p2 forbids it on a typedef); size is pinned by `_Static_assert`.
+- Q16.16 arithmetic widens intermediate products to `int64_t`, and overflow is tested at
+  the boundary.
+- New behaviour arrives with its test in the same commit. Nothing is finished until
+  `./scripts/verify.sh` is green in all three profiles.

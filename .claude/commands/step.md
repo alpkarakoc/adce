@@ -1,7 +1,7 @@
 ---
 description: Execute one traceable implementation step under the architecture gate
 argument-hint: <what to build, or "next" to derive it>
-allowed-tools: Read, Grep, Glob, Edit, Write, Bash(pnpm:*), Bash(git:*), Bash(npx:*), Bash(docker:*)
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash(cc:*), Bash(git:*), Bash(uname:*), Bash(./scripts/verify.sh)
 ---
 
 <task>
