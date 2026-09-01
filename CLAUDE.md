@@ -46,3 +46,9 @@ publication path.
 - `scripts/verify.sh` and the files under `scripts/hooks/` are the verification gate.
   Never modify them in the same commit as the code they check. A gate change is proposed
   first, with its reason, and lands in its own commit.
+- `adce_rng_seed` calls `abort()` when the entropy draw fails. A PRNG seeded from a
+  failed or partial draw is predictable and every downstream containment decision
+  inherits that, so there is deliberately no degraded seeding path.
+- Changing a public function's signature, return contract, or failure behaviour is an
+  API decision. Propose it and wait for confirmation; never fold it into a step whose
+  stated scope was something else.
