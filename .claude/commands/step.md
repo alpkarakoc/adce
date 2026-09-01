@@ -14,7 +14,7 @@ Follow these phases in order. Do not skip ahead; each phase's output is the next
 Read before asserting. Establish ground truth from the repository, not from assumption:
 - `git status --short` and `git log --oneline -10`
 - Every file the task touches or depends on, read in full
-- `pnpm verify` — record the current exit code as the baseline
+- `./scripts/verify.sh` — record the current exit code as the baseline
 
 Report contradictions between the task and what the repository actually contains. If the task
 presumes a symbol, column, port, or file that does not exist, say so and stop.
@@ -48,7 +48,7 @@ Hard constraints:
 </phase>
 
 <phase name="verify">
-Run `pnpm verify`. Paste the real terminal output, including the exit code. Do not paraphrase
+Run `./scripts/verify.sh`. Paste the real terminal output, including the exit code. Do not paraphrase
 it and do not claim success you did not observe. If it fails, fix and rerun — a red gate is
 not a finding to report, it is work that is not finished.
 </phase>
@@ -58,6 +58,6 @@ Close with exactly these four sections, no preamble and no summary of what you j
 
 1. CHANGED — file paths with a one-line description each
 2. TRACE — each change mapped to its originating requirement or decision
-3. VERIFICATION — the `pnpm verify` result, verbatim
+3. VERIFICATION — the `./scripts/verify.sh` result, verbatim
 4. NEXT — the single most traceable follow-on step, and what currently blocks it
 </output_contract>
