@@ -18,7 +18,11 @@ $CC $STRICT $INC "$SRC" -o "$OUT/t_strict" -lpthread
 echo "== 2/3 asan + ubsan =="
 $CC -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -fno-sanitize-recover=all $INC "$SRC" -o "$OUT/t_asan" -lpthread
-ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$OUT/t_asan"
+# LeakSanitizer has no Darwin back end; asking for it aborts the binary before
+# a single test runs. It stays enforced on the Linux shipping target.
+ASAN_LEAKS=0
+if [ "$(uname -s)" = "Linux" ]; then ASAN_LEAKS=1; fi
+ASAN_OPTIONS="detect_leaks=$ASAN_LEAKS" UBSAN_OPTIONS=print_stacktrace=1 "$OUT/t_asan"
 
 echo "== 3/3 tsan =="
 # Seqlock payload'ı relaxed atomic ise bu profil temiz geçer. Geçmiyorsa kod C11
