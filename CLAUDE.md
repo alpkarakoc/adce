@@ -21,8 +21,11 @@ it.
   acquire/release. No mutexes, no spinlocks, no allocation.
 - `include/adce_observe.h` — Observation Plane types, the single tuning-constant block
   (T, N, z_lo, z_hi, alpha, the sigma epsilon, the warmup length), and the inline
-  per-arrival tap. Pure functions on the publication path — squash, clamp, square root —
-  are inline here so the tests reach them without a running observer.
+  per-arrival tap. Pure functions on the publication path — squash and clamp — are inline
+  here so the tests reach them without a running observer. `sigma` comes from libm's
+  `sqrt`; both gates link `-lm`, and the fail-closed handling sits in the epsilon floor in
+  `adce_obs_epoch_close`, written as `!(sigma >= EPS)` so one comparison covers NaN,
+  negative and zero.
 - `src/adce_observe.c` — Observation Plane producer, off the arrival path: `adce_obs_init`,
   `adce_obs_claim_writer`, `adce_obs_epoch_close`.
 - `test/t_adce_platform.c` — owns `main()` and the single runner table. `t_*` unit tests:

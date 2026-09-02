@@ -6,6 +6,8 @@
 
 #include "adce_observe.h"
 
+#include <math.h>
+
 /* Ownership test run on every publish. Affordable precisely because publish
  * is once per epoch rather than once per event, which is why it stays always
  * on instead of hiding behind NDEBUG -- a check compiled out of the shipping
@@ -109,8 +111,29 @@ int adce_obs_epoch_close(adce_obs_ctx_t *ctx, uint64_t observed_at_ns) {
     ctx->mu = ctx->mu + ADCE_OBS_ALPHA * d;
     ctx->var = (1.0 - ADCE_OBS_ALPHA) * (ctx->var + ADCE_OBS_ALPHA * d * d);
 
-    sigma = adce_obs_sqrt(ctx->var);
-    if (sigma < ADCE_OBS_SIGMA_EPSILON) {
+    /* Epsilon floor on sigma, written as a negated >= rather than as an
+     * ordinary <. The two differ on exactly one input -- NaN -- and that
+     * difference is the entire reason for the shape: `sigma < EPS` is FALSE
+     * for a NaN, so a NaN would pass the floor untouched and make z NaN. The
+     * negated form is unordered-safe, so this one comparison covers NaN,
+     * negative and zero together.
+     *
+     * That is defence in depth, not a guard against a reachable input, and
+     * the distinction is deliberate. var cannot be NaN or infinite here:
+     * arrivals is a uint64_t so rate is finite and non-negative, T is a
+     * nonzero compile-time constant so the division yields neither inf nor
+     * 0/0, mu stays inside the convex hull of the rates it averages so
+     * |d| <= rate_max, and the recurrence is a contraction with fixed point
+     * (1-alpha)*max(d^2) ~ 3.3e42 -- 266 orders of magnitude below DBL_MAX,
+     * measured at UINT64_MAX arrivals per epoch. The floor has to exist
+     * anyway for the reachable case, where steady traffic collapses var
+     * toward zero; writing it totally costs nothing.
+     *
+     * The one non-finite value this does NOT normalise is +inf, which would
+     * make z zero and read as calm. It is unreachable by the same bound, and
+     * is deliberately left unguarded rather than defended against twice. */
+    sigma = sqrt(ctx->var);
+    if (!(sigma >= ADCE_OBS_SIGMA_EPSILON)) {
         sigma = ADCE_OBS_SIGMA_EPSILON;
     }
     ctx->last_z = d / sigma;

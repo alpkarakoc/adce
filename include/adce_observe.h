@@ -113,62 +113,6 @@ static inline uint64_t adce_obs_counter_take(adce_obs_counter_t *counter) {
  * ===========================================================================
  */
 
-/* Square root without libm.
- *
- * Neither scripts/verify.sh nor scripts/verify-linux-gcc.sh links -lm, and
- * under -O2 GCC keeps an errno fallback call to sqrt() even for
- * __builtin_sqrt on a provably non-negative argument, so libm is genuinely
- * unreachable from here. Adding -lm is a gate change and lands in its own
- * commit; this exists so the plane does not depend on that ordering.
- *
- * Accurate to within an ulp, which is far finer than a z-score threshold
- * needs, and -- because the iteration count is fixed rather than
- * convergence-tested -- bit-identical for identical input, which is what the
- * determinism property rests on. Runs once per epoch, never on the tap. */
-#define ADCE_OBS_NEWTON_STEPS 7
-
-static inline double adce_obs_sqrt(double v) {
-    uint64_t bits;
-    uint64_t guess_bits;
-    double x;
-    int biased;
-    int e;
-    int i;
-
-    /* Written as a negated > rather than <= so a NaN takes this branch too. */
-    if (!(v > 0.0)) {
-        return 0.0;
-    }
-
-    memcpy(&bits, &v, sizeof(bits));
-    biased = (int)((bits >> 52) & (uint64_t)0x7FF);
-
-    /* Subnormal, infinite or NaN. var is a sum of squares and cannot reach
-     * these from any finite rate; returning zero hands the decision to the
-     * epsilon floor instead of propagating a non-finite sigma into z. */
-    if (biased == 0 || biased == 0x7FF) {
-        return 0.0;
-    }
-
-    /* Initial estimate 2^(e/2), built by writing the exponent field directly
-     * because frexp and ldexp are also libm. C division truncates toward
-     * zero, so for odd or negative e the estimate is off by at most a factor
-     * of two -- which is the bound the step count below is chosen against. */
-    e = biased - 1023;
-    guess_bits = ((uint64_t)((e / 2) + 1023) & (uint64_t)0x7FF) << 52;
-    memcpy(&x, &guess_bits, sizeof(x));
-
-    /* Newton-Raphson converges quadratically: from a relative error of 1 the
-     * errors run 0.25, 2.5e-2, 3.1e-4, 4.7e-8, 1.1e-15, 5.8e-31. Seven steps
-     * therefore reach full double precision with a step to spare even from
-     * the worst starting point. */
-    for (i = 0; i < ADCE_OBS_NEWTON_STEPS; ++i) {
-        x = 0.5 * (x + v / x);
-    }
-
-    return x;
-}
-
 /* Piecewise-linear squash, not logistic: exactly representable in Q16, no
  * transcendental on the path, and saturation points that are auditable
  * numbers rather than curve parameters. */

@@ -8,6 +8,7 @@
 
 #include "../include/adce_observe.h"
 
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 
@@ -19,17 +20,12 @@
         }                                                                    \
     } while (0)
 
-/* fabs() is libm, which neither gate links; see the note on adce_obs_sqrt. */
-static double obs_abs(double v) {
-    return v < 0.0 ? -v : v;
-}
-
 static int obs_close(double got, double want, double tol) {
-    double scale = obs_abs(want);
+    double scale = fabs(want);
     if (scale < 1.0) {
         scale = 1.0;
     }
-    return obs_abs(got - want) <= tol * scale;
+    return fabs(got - want) <= tol * scale;
 }
 
 /* The counter and the epoch state are cache-line aligned, so they are given
@@ -44,52 +40,91 @@ static void obs_fresh(adce_obs_ctx_t *ctx, adce_obs_counter_t *counter,
 }
 
 /* =====================================================================
- * 1. The square root the sigma computation depends on.
+ * 1. The epsilon floor on sigma.
  *
- * Written for this plane because libm is unreachable from the gates, so it
- * is new code and carries its own coverage rather than being trusted
- * because the EWMA test happens to pass.
+ * Replaces the test of the hand-rolled root, which is gone: sigma now comes
+ * from libm's sqrt, and the fail-closed handling that lived inside that
+ * helper has moved to the floor in adce_obs_epoch_close. What is tested here
+ * is the floor's own behaviour -- the reachable case it exists for, and the
+ * totality of the comparison that implements it.
  * ===================================================================== */
 
-static int test_obs_sqrt(void) {
-    /* Exact powers of four have exact roots and must come back exact, not
-     * merely close: an off-by-one in the exponent seeding would still land
-     * within tolerance on these but not on the bit. */
-    ADCE_TEST_ASSERT(adce_obs_sqrt(1.0) == 1.0);
-    ADCE_TEST_ASSERT(adce_obs_sqrt(4.0) == 2.0);
-    ADCE_TEST_ASSERT(adce_obs_sqrt(16.0) == 4.0);
-    ADCE_TEST_ASSERT(adce_obs_sqrt(0.25) == 0.5);
-    ADCE_TEST_ASSERT(adce_obs_sqrt(1048576.0) == 1024.0);
+static int test_obs_sigma_floor(void) {
+    adce_obs_ctx_t ctx;
+    int k;
 
-    /* Non-negative guard, and the fail-closed handling of the values var
-     * cannot reach but a corrupted state could. */
-    ADCE_TEST_ASSERT(adce_obs_sqrt(0.0) == 0.0);
-    ADCE_TEST_ASSERT(adce_obs_sqrt(-1.0) == 0.0);
+    /* The reachable case, and the one the floor was designed for. Perfectly
+     * steady traffic drives var toward zero, so sigma collapses; without a
+     * floor the next ordinary deviation would divide by ~0 and read as
+     * unbounded z. This is the hair trigger after a quiet period. */
+    obs_fresh(&ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(adce_obs_claim_writer(&ctx) == 1);
 
+    for (k = 1; k <= 1000; ++k) {
+        atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)10,
+                              memory_order_relaxed);
+        ADCE_TEST_ASSERT(adce_obs_epoch_close(
+                             &ctx, (uint64_t)k * (uint64_t)ADCE_OBS_EPOCH_NS) >=
+                         0);
+    }
+
+    /* Measured, not guessed: var peaks near 1.2e5 around epoch 100 as the
+     * mean climbs to meet the rate, then decays by (1-alpha) per epoch to
+     * 2.1e-3 by epoch 1000. The bound below is the property that matters --
+     * sigma has fallen under the floor, so the floor is what the next
+     * division will use. */
+    ADCE_TEST_ASSERT(ctx.var >= 0.0);
+    ADCE_TEST_ASSERT(ctx.var < 1.0);
+    ADCE_TEST_ASSERT(sqrt(ctx.var) < ADCE_OBS_SIGMA_EPSILON);
+
+    /* One extra arrival after that quiet run. The rate moves by exactly
+     * 1/T = the epsilon floor, so a floored sigma caps z at 1.0 -- well
+     * below z_lo, so nothing is published as pressure. An unfloored sigma
+     * would have made this enormous. */
+    atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)11,
+                          memory_order_relaxed);
+    ADCE_TEST_ASSERT(adce_obs_epoch_close(
+                         &ctx, (uint64_t)1001 * (uint64_t)ADCE_OBS_EPOCH_NS) == 1);
+    ADCE_TEST_ASSERT(isfinite(ctx.last_z));
+    ADCE_TEST_ASSERT(obs_close(ctx.last_z, 1.0, 1e-6));
+    ADCE_TEST_ASSERT(adce_obs_squash(ctx.last_z) == 0.0);
+
+    /* Totality of the comparison, which is a property of the code rather than
+     * of any reachable input. A NaN var cannot arise from the tap -- arrivals
+     * is a uint64_t, T is a nonzero constant, and the recurrence is a
+     * contraction bounded ~266 orders below DBL_MAX -- so one is injected
+     * directly into the public context field.
+     *
+     * This is here because `!(sigma >= EPS)` and `sigma < EPS` differ on
+     * exactly this input and on no other: the ordinary comparison is false
+     * for a NaN, which would leave sigma NaN and z NaN. Nothing else in the
+     * suite would catch a simplification back to `<`. */
     {
         volatile double zero = 0.0;
-        double nan_v = zero / zero;
-        ADCE_TEST_ASSERT(adce_obs_sqrt(nan_v) == 0.0);
-    }
+        adce_q16_t pressure;
+        uint64_t epoch_id;
+        uint64_t observed_at_ns;
 
-    /* Verified from the defining relation -- x*x == v -- rather than against
-     * another square root, over a range spanning the exponents a rate
-     * variance actually occupies. */
-    {
-        double v = 1e-6;
-        int i;
-        for (i = 0; i < 40; ++i) {
-            double r = adce_obs_sqrt(v);
-            ADCE_TEST_ASSERT(obs_close(r * r, v, 1e-15));
-            v *= 7.3;
-        }
-    }
+        ctx.var = zero / zero;
+        ADCE_TEST_ASSERT(isnan(ctx.var));
 
-    /* Odd and negative exponents are where the truncating e/2 seed is at its
-     * worst; the fixed step count must still converge from there. */
-    ADCE_TEST_ASSERT(obs_close(adce_obs_sqrt(2.0), 1.4142135623730951, 1e-15));
-    ADCE_TEST_ASSERT(obs_close(adce_obs_sqrt(0.125), 0.35355339059327379,
-                               1e-15));
+        atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)50,
+                              memory_order_relaxed);
+        ADCE_TEST_ASSERT(adce_obs_epoch_close(&ctx, (uint64_t)1002 *
+                                                        (uint64_t)
+                                                            ADCE_OBS_EPOCH_NS) ==
+                         1);
+
+        /* The floor normalised sigma, so z stayed finite and what reached the
+         * Q16 conversion was a real number. Converting a NaN to an integer is
+         * undefined, so this is the assertion that the UB path is closed. */
+        ADCE_TEST_ASSERT(isfinite(ctx.last_z));
+
+        ADCE_TEST_ASSERT(adce_epoch_read(&g_obs_epoch, &pressure, &epoch_id,
+                                         &observed_at_ns) == 1);
+        ADCE_TEST_ASSERT(pressure >= ADCE_PRESSURE_MIN &&
+                         pressure <= ADCE_PRESSURE_MAX);
+    }
 
     return 0;
 }
@@ -149,8 +184,7 @@ static int test_obs_ewma_update(void) {
 
     /* Steady traffic drove sigma toward zero, and the epsilon floor is what
      * stops the next ordinary deviation from reading as unbounded z. */
-    ADCE_TEST_ASSERT(obs_abs(ctx.last_z) <
-                     r / ADCE_OBS_SIGMA_EPSILON + 1.0);
+    ADCE_TEST_ASSERT(fabs(ctx.last_z) < r / ADCE_OBS_SIGMA_EPSILON + 1.0);
 
     return 0;
 }
@@ -633,7 +667,7 @@ static int test_obs_tap_counter(void) {
     int adce_t_##name(void);                                                 \
     int adce_t_##name(void) { return test_##name(); }
 
-ADCE_OBS_TEST_EXPORT(obs_sqrt)
+ADCE_OBS_TEST_EXPORT(obs_sigma_floor)
 ADCE_OBS_TEST_EXPORT(obs_ewma_update)
 ADCE_OBS_TEST_EXPORT(obs_squash)
 ADCE_OBS_TEST_EXPORT(obs_publication_clamp)
