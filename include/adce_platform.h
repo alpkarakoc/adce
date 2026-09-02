@@ -13,6 +13,25 @@ extern "C" {
 #error "ADCE requires compiler support for 128-bit integer extensions (__int128 / unsigned __int128)"
 #endif
 
+/* glibc hides POSIX and Linux declarations while __STRICT_ANSI__ is set, and
+ * -std=c11 sets it. Without this, clock_gettime and CLOCK_MONOTONIC_RAW are
+ * invisible on Linux and the header does not compile at all -- an implicit
+ * declaration, not a warning. 200809L is the narrowest level that exposes both
+ * the clock and getrandom(); _GNU_SOURCE is not required.
+ *
+ * Linux only, and that guard is load-bearing rather than tidiness: on Darwin
+ * the same macro does the OPPOSITE. Apple's SDK exposes CLOCK_MONOTONIC_RAW as
+ * a Darwin extension by default and switches to strict POSIX -- hiding it --
+ * as soon as _POSIX_C_SOURCE is defined without _DARWIN_C_SOURCE. Defining it
+ * unconditionally fixes the shipping target and breaks the development host.
+ *
+ * This has to precede every libc header, so it stays at the very top;
+ * __linux__ is a compiler predefine and is available this early. An explicit
+ * setting from the build is respected rather than overridden. */
+#if defined(__linux__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <errno.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -21,6 +40,27 @@ extern "C" {
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+/* If the translation unit pulled in <time.h> before this header, the feature
+ * macro above arrived too late and the declaration is already hidden. Fail
+ * here, on the actual requirement, rather than 130 lines down as an implicit
+ * declaration inside adce_now_ns. */
+#if !defined(CLOCK_MONOTONIC_RAW)
+#error "CLOCK_MONOTONIC_RAW is not visible: include adce_platform.h before <time.h>, or build with -D_POSIX_C_SOURCE=200809L"
+#endif
+
+/* The 128-bit lane, declared once. __int128 is a compiler extension, so ISO C
+ * mode diagnoses the type specifier itself ("ISO C does not support '__int128'
+ * types"), which -Werror makes fatal on GCC; Clang stays silent, which is why
+ * only the shipping target caught it. __extension__ suppresses that for
+ * exactly these two declarations, and every other use in the codebase goes
+ * through the typedef names, where the diagnostic does not fire. Note this is
+ * narrower than it looks: the pedwarn also fires on bare casts, not only on
+ * declarations, so routing all uses through a typedef is what actually covers
+ * every site. Dropping -pedantic or adding -Wno-pedantic would trade the
+ * entire standards check for this one diagnostic. */
+__extension__ typedef __int128 adce_i128_t;
+__extension__ typedef unsigned __int128 adce_u128_t;
 
 /* ===========================================================================
  * Platform abstraction.
@@ -195,7 +235,7 @@ static inline adce_q16_t adce_q16_sub(adce_q16_t a, adce_q16_t b) {
 }
 
 static inline adce_q16_t adce_q16_mul(adce_q16_t a, adce_q16_t b) {
-    __int128 wide = (__int128)a * (__int128)b;
+    adce_i128_t wide = (adce_i128_t)a * (adce_i128_t)b;
     return (adce_q16_t)(wide >> ADCE_Q16_FRAC_BITS);
 }
 
@@ -213,17 +253,17 @@ static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
      * Clang both define an out-of-range unsigned->signed conversion as
      * modular two's-complement wrap, which is the bit pattern relied on here.
      */
-    __int128 wide =
-        (__int128)((unsigned __int128)(__int128)a << ADCE_Q16_FRAC_BITS);
-    __int128 q = wide / (__int128)b;
+    adce_i128_t wide =
+        (adce_i128_t)((adce_u128_t)(adce_i128_t)a << ADCE_Q16_FRAC_BITS);
+    adce_i128_t q = wide / (adce_i128_t)b;
 
     /* ADCE_Q16_MIN / -1 is +2^79. Widening before the divide keeps the
      * division itself safe, but the quotient still outruns the 64-bit lane,
      * so clamp it rather than narrow it silently. */
-    if (q > (__int128)ADCE_Q16_MAX) {
+    if (q > (adce_i128_t)ADCE_Q16_MAX) {
         return ADCE_Q16_MAX;
     }
-    if (q < (__int128)ADCE_Q16_MIN) {
+    if (q < (adce_i128_t)ADCE_Q16_MIN) {
         return ADCE_Q16_MIN;
     }
     return (adce_q16_t)q;
@@ -243,8 +283,6 @@ static inline adce_q16_t adce_q16_max(adce_q16_t a, adce_q16_t b) {
  * before it is clamped back down to the bucket's Q16.16 capacity.
  * ===========================================================================
  */
-
-typedef unsigned __int128 adce_u128_t;
 
 static inline uint64_t adce_token_refill(uint64_t current_tokens_q16,
                                           uint64_t rate_q16_per_ns,
