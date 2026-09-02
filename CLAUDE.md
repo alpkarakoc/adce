@@ -58,10 +58,14 @@ publication path.
   numerator does not fit in `int64_t`. The dependency is made explicit by the `#error`
   guard at the top of the header. Do not "clean it up" — it cannot be removed without
   narrowing the Q16 lane, which is a separate design decision.
-- Open risk, not yet verified: GCC emits a pedwarn for `__int128` under `-pedantic`, which
-  `-Werror` turns into a build failure. Clang does not, which is why profile 1 passes on
-  the macOS dev host. The shipping target has never been built. A Linux/GCC profile is
-  required before any release claim.
+- The shipping target builds and its tests pass under GCC 14 on linux/arm64 and
+  linux/amd64 (`scripts/verify-linux-gcc.sh`). GCC's `__int128` pedwarn under `-pedantic`
+  is resolved by `__extension__` on the two typedefs, with every use routed through them:
+  the diagnostic fires on bare casts too, so annotating declarations alone would not have
+  covered it. `-pedantic` is intact.
+- Still unverified: no real x86_64 hardware has run this code. The amd64 profile is qemu
+  emulation, which proves compilation and test outcomes, not timing or memory-model
+  behaviour. The arm64 native TSan run remains the authoritative concurrency evidence.
 - `adce_q16_div` with a zero divisor saturates toward the numerator's sign: negative
   numerator yields `ADCE_Q16_MIN`, zero or positive yields `ADCE_Q16_MAX`. A collapsed
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
