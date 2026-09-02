@@ -67,3 +67,7 @@ publication path.
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
   `ADCE_Q16_MAX` by this rule. This is a fail-closed contract; changing it is an API
   decision.
+- Open defect, not yet scheduled: `adce_q16_to_int` floors negative values (arithmetic
+  right shift) while `adce_q16_div` truncates toward zero (C integer division). The two
+  disagree on non-integral negatives. Resolving it is an API decision — pick one rounding
+  mode, apply it to both, and test the boundary. Do not change either in isolation.

@@ -20,7 +20,8 @@ paths:
 - Time source is `CLOCK_MONOTONIC_RAW` only. `CLOCK_REALTIME` can step backwards.
 - The publication object occupies exactly one `ADCE_CACHELINE`. `_Alignas` goes on the
   first member (C11 §6.7.5p2 forbids it on a typedef); size is pinned by `_Static_assert`.
-- Q16.16 arithmetic widens intermediate products to `int64_t`, and overflow is tested at
-  the boundary.
+- Q16.16 arithmetic widens intermediate products to `__int128`, a locked dependency
+  guarded by the `#error` at the top of the header. `ADCE_Q16_MAX` is `INT64_MAX`, so
+  `int64_t` is too narrow. Overflow and saturation are tested at the boundary.
 - New behaviour arrives with its test in the same commit. Nothing is finished until
   `./scripts/verify.sh` is green in all three profiles.
