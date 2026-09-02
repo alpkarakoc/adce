@@ -58,7 +58,8 @@ static int test_q16_boundaries(void) {
                      ((adce_q16_t)INT32_MAX << ADCE_Q16_FRAC_BITS));
     ADCE_TEST_ASSERT(adce_q16_from_int(INT32_MIN) == -((adce_q16_t)1 << 47));
 
-    /* Negative multiplication and division keep C's truncation toward zero. */
+    /* Exact negative division: the remainder is zero, so the quotient is
+     * already floored and the correction must stay off. */
     ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_mul(adce_q16_from_int(-3),
                                                   adce_q16_from_int(4))) == -12);
     ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_div(adce_q16_from_int(-12),
@@ -79,9 +80,76 @@ static int test_q16_boundaries(void) {
     ADCE_TEST_ASSERT(adce_q16_div(0, 0) == ADCE_Q16_MAX);
 
     /* ADCE_Q16_MIN / -1 is +2^79, which no 64-bit lane holds: it must clamp
-     * to the maximum instead of narrowing silently. */
+     * to the maximum instead of narrowing silently. The division is exact, so
+     * the floor correction does not fire and cannot disturb the clamp. */
     ADCE_TEST_ASSERT(adce_q16_div(ADCE_Q16_MIN, -1) == ADCE_Q16_MAX);
     ADCE_TEST_ASSERT(adce_q16_div(ADCE_Q16_MAX, -1) == ADCE_Q16_MIN);
+
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-12),
+                                  adce_q16_from_int(-4)) == 3 * ADCE_Q16_ONE);
+
+    /* Half-integers ARE representable in Q16.16, so these four are exact and
+     * must come back unchanged -- they would read identically under either
+     * rounding mode. They are here to catch a correction applied where no
+     * remainder exists, which is the likeliest way to get flooring wrong. */
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-7),
+                                  adce_q16_from_int(2)) == -7 * ADCE_Q16_ONE / 2);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(7),
+                                  adce_q16_from_int(-2)) == -7 * ADCE_Q16_ONE / 2);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-1),
+                                  adce_q16_from_int(2)) == -ADCE_Q16_ONE / 2);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(1),
+                                  adce_q16_from_int(-2)) == -ADCE_Q16_ONE / 2);
+
+    /* Thirds are NOT representable, so these are the cases the correction
+     * exists for and the only ones whose value changes. Truncation toward
+     * zero returned -21845 and -152917; flooring returns one less. Same-sign
+     * operands round the same way under both modes and must not shift. */
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-1),
+                                  adce_q16_from_int(3)) == -21846);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(1),
+                                  adce_q16_from_int(-3)) == -21846);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-7),
+                                  adce_q16_from_int(3)) == -152918);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(1),
+                                  adce_q16_from_int(3)) == 21845);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-1),
+                                  adce_q16_from_int(-3)) == 21845);
+
+    /* adce_q16_to_int and adce_q16_div now agree: both round toward negative
+     * infinity, so composing them gives integer floor division. -7/2 lands on
+     * -4, not the -3 that truncation toward zero would produce. */
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_div(adce_q16_from_int(-7),
+                                                  adce_q16_from_int(2))) == -4);
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_div(adce_q16_from_int(-1),
+                                                  adce_q16_from_int(3))) == -1);
+
+    /* Property sweep, checked from the defining relation rather than by
+     * recomputing the quotient the same way the implementation does: for a
+     * floored quotient the remainder carries the DIVISOR's sign and is
+     * strictly smaller in magnitude. Truncation toward zero violates the sign
+     * half of that for precisely the mixed-sign inexact pairs. */
+    for (int32_t na = -9; na <= 9; ++na) {
+        for (int32_t da = -9; da <= 9; ++da) {
+            if (da == 0) {
+                continue;
+            }
+
+            adce_q16_t quot =
+                adce_q16_div(adce_q16_from_int(na), adce_q16_from_int(da));
+
+            /* The same unsigned detour the header takes: left-shifting a
+             * negative signed value is undefined and UBSan checks profile 2. */
+            adce_i128_t num =
+                (adce_i128_t)((adce_u128_t)(adce_i128_t)adce_q16_from_int(na)
+                              << ADCE_Q16_FRAC_BITS);
+            adce_i128_t den = (adce_i128_t)adce_q16_from_int(da);
+            adce_i128_t rem = num - (adce_i128_t)quot * den;
+
+            ADCE_TEST_ASSERT(rem == 0 || ((rem < 0) == (den < 0)));
+            ADCE_TEST_ASSERT((rem < 0 ? -rem : rem) < (den < 0 ? -den : den));
+        }
+    }
 
     return 0;
 }

@@ -67,7 +67,11 @@ publication path.
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
   `ADCE_Q16_MAX` by this rule. This is a fail-closed contract; changing it is an API
   decision.
-- Open defect, not yet scheduled: `adce_q16_to_int` floors negative values (arithmetic
-  right shift) while `adce_q16_div` truncates toward zero (C integer division). The two
-  disagree on non-integral negatives. Resolving it is an API decision — pick one rounding
-  mode, apply it to both, and test the boundary. Do not change either in isolation.
+- Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
+  floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
+  truncated quotient down when the remainder is non-zero and the operand signs differ.
+  Truncation toward zero was the earlier behaviour and left a dead band two LSBs wide
+  around zero, where the quantization step doubles — a pressure signal driving threshold
+  crossings behaves differently there than anywhere else in its range. Flooring is
+  uniform. This is a contract; changing it, or changing one function without the other,
+  is an API decision.

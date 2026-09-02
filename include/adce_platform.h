@@ -222,6 +222,9 @@ static inline adce_q16_t adce_q16_from_int(int32_t v) {
     return (adce_q16_t)((uint64_t)(int64_t)v << ADCE_Q16_FRAC_BITS);
 }
 
+/* Rounds toward negative infinity, not toward zero: the arithmetic right
+ * shift floors, and adce_q16_div is defined to match. See the rounding note
+ * in adce_q16_div for why flooring is the project-wide choice. */
 static inline int32_t adce_q16_to_int(adce_q16_t v) {
     return (int32_t)(v >> ADCE_Q16_FRAC_BITS);
 }
@@ -255,7 +258,24 @@ static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
      */
     adce_i128_t wide =
         (adce_i128_t)((adce_u128_t)(adce_i128_t)a << ADCE_Q16_FRAC_BITS);
-    adce_i128_t q = wide / (adce_i128_t)b;
+    adce_i128_t divisor = (adce_i128_t)b;
+    adce_i128_t q = wide / divisor;
+    adce_i128_t rem = wide % divisor;
+
+    /* Round toward negative infinity rather than toward zero. C division
+     * truncates, which leaves a dead band two LSBs wide straddling zero: the
+     * quantization step doubles there while it is uniform everywhere else in
+     * the lane. A pressure signal driving threshold crossings would therefore
+     * behave systematically differently near zero than across the rest of its
+     * range. Flooring gives a uniform step and matches adce_q16_to_int, whose
+     * arithmetic right shift has always floored.
+     *
+     * The signs come from the already-widened operands, not from a and b, so
+     * this reads the values actually divided. A zero remainder is already
+     * floored, which keeps the correction off the exact-division path. */
+    if (rem != 0 && ((wide < 0) != (divisor < 0))) {
+        q -= 1;
+    }
 
     /* ADCE_Q16_MIN / -1 is +2^79. Widening before the divide keeps the
      * division itself safe, but the quotient still outruns the 64-bit lane,
