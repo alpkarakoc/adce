@@ -130,6 +130,23 @@ static int test_time_source(void) {
     return 0;
 }
 
+static int test_epoch_state_lock_free(void) {
+    static adce_epoch_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    /* A non-lock-free _Atomic is implemented with a hidden lock, which would
+     * put a mutex on the publication path. The header's size and alignment
+     * assertions cannot see that -- a lock-backed atomic can still be
+     * 8 bytes wide -- so it is checked here, on the real struct members
+     * rather than on the underlying types. */
+    ADCE_TEST_ASSERT(atomic_is_lock_free(&state.sequence));
+    ADCE_TEST_ASSERT(atomic_is_lock_free(&state.pressure));
+    ADCE_TEST_ASSERT(atomic_is_lock_free(&state.epoch_id));
+    ADCE_TEST_ASSERT(atomic_is_lock_free(&state.observed_at_ns));
+
+    return 0;
+}
+
 static int test_seqlock_single_threaded(void) {
     static adce_epoch_state_t state;
     memset(&state, 0, sizeof(state));
@@ -213,6 +230,7 @@ int main(void) {
         {"token_bucket", test_token_bucket},
         {"rng", test_rng},
         {"time_source", test_time_source},
+        {"epoch_state_lock_free", test_epoch_state_lock_free},
         {"seqlock_single_threaded", test_seqlock_single_threaded},
         {"seqlock_concurrent", test_seqlock_concurrent},
     };

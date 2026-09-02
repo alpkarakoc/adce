@@ -124,6 +124,19 @@ _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
 _Static_assert(sizeof(_Atomic uint64_t) == sizeof(uint64_t),
                "atomic uint64_t must not carry hidden lock-object overhead");
 
+/* The publication object's payload is _Atomic, so its layout is only
+ * predictable while _Atomic is a pure qualifier here. A compiler that widens
+ * or over-aligns these types would silently repack adce_epoch_state_t; these
+ * four assertions exist so that fails the build instead. Do not "fix" a
+ * failure here by re-tuning the padding -- the target has changed, and the
+ * single-cache-line publication design has to be re-decided. */
+_Static_assert(_Alignof(_Atomic uint64_t) == _Alignof(uint64_t),
+               "atomic uint64_t must not change alignment");
+_Static_assert(sizeof(_Atomic int64_t) == sizeof(int64_t),
+               "atomic int64_t must not carry hidden lock-object overhead");
+_Static_assert(_Alignof(_Atomic int64_t) == _Alignof(int64_t),
+               "atomic int64_t must not change alignment");
+
 /* ===========================================================================
  * Time source: CLOCK_MONOTONIC_RAW only. CLOCK_REALTIME and CLOCK_MONOTONIC
  * are prohibited project-wide to eliminate NTP slew as an attack surface on
@@ -365,11 +378,12 @@ static inline int adce_seqlock_read_retry(const adce_seq_t *seq, uint64_t start)
  * alignment up to a full cache line. */
 typedef struct {
     _Alignas(ADCE_CACHELINE) adce_seq_t sequence;
-    adce_q16_t pressure;
-    uint64_t epoch_id;
-    uint64_t observed_at_ns;
+    _Atomic adce_q16_t pressure;
+    _Atomic uint64_t epoch_id;
+    _Atomic uint64_t observed_at_ns;
     uint8_t _reserved[ADCE_CACHELINE - sizeof(adce_seq_t) -
-                       sizeof(adce_q16_t) - sizeof(uint64_t) - sizeof(uint64_t)];
+                       sizeof(_Atomic adce_q16_t) - sizeof(_Atomic uint64_t) -
+                       sizeof(_Atomic uint64_t)];
 } adce_epoch_state_t;
 
 _Static_assert(sizeof(adce_epoch_state_t) == ADCE_CACHELINE,
@@ -382,9 +396,14 @@ static inline void adce_epoch_publish(adce_epoch_state_t *state,
                                        uint64_t epoch_id,
                                        uint64_t observed_at_ns) {
     adce_seqlock_write_begin(&state->sequence);
-    state->pressure = pressure;
-    state->epoch_id = epoch_id;
-    state->observed_at_ns = observed_at_ns;
+    /* Relaxed is sufficient and is the point: the payload carries no ordering
+     * of its own, and the two release increments bracketing it are what make
+     * these stores visible. Anything stronger buys a barrier per field for
+     * nothing. */
+    atomic_store_explicit(&state->pressure, pressure, memory_order_relaxed);
+    atomic_store_explicit(&state->epoch_id, epoch_id, memory_order_relaxed);
+    atomic_store_explicit(&state->observed_at_ns, observed_at_ns,
+                          memory_order_relaxed);
     adce_seqlock_write_end(&state->sequence);
 }
 
@@ -394,9 +413,16 @@ static inline int adce_epoch_read(const adce_epoch_state_t *state,
                                    uint64_t *observed_at_ns) {
     uint64_t s0 = adce_seqlock_read_begin(&state->sequence);
 
-    adce_q16_t p = state->pressure;
-    uint64_t e = state->epoch_id;
-    uint64_t t = state->observed_at_ns;
+    /* Relaxed atomic loads, not plain loads. Detecting a torn read after the
+     * fact does not make the read legal: concurrent non-atomic access is a
+     * data race, and a data race is UB that licenses the compiler to split,
+     * refetch, or hoist these loads out of the retry entirely. The acquire
+     * fence that orders them against the second sequence read is inside
+     * adce_seqlock_read_retry. */
+    adce_q16_t p = atomic_load_explicit(&state->pressure, memory_order_relaxed);
+    uint64_t e = atomic_load_explicit(&state->epoch_id, memory_order_relaxed);
+    uint64_t t =
+        atomic_load_explicit(&state->observed_at_ns, memory_order_relaxed);
 
     if (adce_seqlock_read_retry(&state->sequence, s0)) {
         return 0;
