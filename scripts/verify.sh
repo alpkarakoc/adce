@@ -10,6 +10,18 @@ CC="${CC:-cc}"
 INC="-Iinclude"
 STRICT_FLAGS=(-std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow -Wcast-align
               -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic)
+
+# One list, used by every profile, so a new profile cannot be added with a
+# short link line.
+#
+# -lm looks redundant on the development host and is not. macOS carries libm
+# inside libSystem, so sqrt() links there with or without the flag; on Linux
+# with GCC it does NOT -- under -O2 an errno fallback call to sqrt survives
+# even for __builtin_sqrt on a provably non-negative argument, and the link
+# fails with an undefined reference. Verified on linux/arm64 and linux/amd64
+# under glibc 2.41. Dropping this because a macOS build still works breaks the
+# shipping target and nothing else.
+LDLIBS=(-lpthread -lm)
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
@@ -85,13 +97,13 @@ echo "== sources: ${SRCS[*]} =="
 # The strict binary is built AND run here. Running it last meant it never executed
 # while a later profile was red, leaving profile 1 as build-only.
 echo "== 1/3 strict build + run =="
-"$CC" "${STRICT_FLAGS[@]}" $INC "${SRCS[@]}" -o "$OUT/t_strict" -lpthread
+"$CC" "${STRICT_FLAGS[@]}" $INC "${SRCS[@]}" -o "$OUT/t_strict" "${LDLIBS[@]}"
 "$OUT/t_strict" | tee "$OUT/log-strict"
 assert_all_tests_ran "$OUT/log-strict" "strict"
 
 echo "== 2/3 asan + ubsan =="
 "$CC" -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
-      -fno-sanitize-recover=all $INC "${SRCS[@]}" -o "$OUT/t_asan" -lpthread
+      -fno-sanitize-recover=all $INC "${SRCS[@]}" -o "$OUT/t_asan" "${LDLIBS[@]}"
 ASAN_OPTIONS="detect_leaks=$ASAN_LEAKS" UBSAN_OPTIONS=print_stacktrace=1 \
     "$OUT/t_asan" | tee "$OUT/log-asan"
 assert_all_tests_ran "$OUT/log-asan" "asan+ubsan"
@@ -100,7 +112,7 @@ echo "== 3/3 tsan =="
 # If this fails, the seqlock does not satisfy the C11 memory model. Make the payload
 # fields _Atomic/relaxed. Do not write a suppression file.
 "$CC" -std=c11 -O1 -g -fsanitize=thread -fno-omit-frame-pointer \
-      $INC "${SRCS[@]}" -o "$OUT/t_tsan" -lpthread
+      $INC "${SRCS[@]}" -o "$OUT/t_tsan" "${LDLIBS[@]}"
 TSAN_OPTIONS=halt_on_error=1 "$OUT/t_tsan" | tee "$OUT/log-tsan"
 assert_all_tests_ran "$OUT/log-tsan" "tsan"
 

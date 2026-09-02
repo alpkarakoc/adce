@@ -32,6 +32,15 @@ trap 'rm -rf "$OUT"' EXIT
 STRICT_FLAGS="-std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow"
 STRICT_FLAGS="$STRICT_FLAGS -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic"
 
+# -lm is load-bearing HERE in a way it is not on the development host. macOS
+# carries libm inside libSystem, so verify.sh links sqrt() with or without the
+# flag and a host-only check would never notice its absence; GCC on Linux keeps
+# an errno fallback call to sqrt under -O2 -- even for __builtin_sqrt on a
+# provably non-negative argument -- and the link fails with an undefined
+# reference. Confirmed on both platforms below under glibc 2.41. This gate is
+# the only place that failure is observable.
+LDLIBS="-lpthread -lm"
+
 # --- source discovery -------------------------------------------------------
 # Each platform builds ONE binary from all of src/*.c plus all of test/t_*.c.
 # A hardcoded file list is what allowed this gate to report green while compiling
@@ -123,7 +132,7 @@ for platform in linux/arm64 linux/amd64; do
     # the output to check; 'pipefail' keeps the container's exit status decisive.
     if docker run --rm --platform "$platform" -v "$PWD":/src:ro -w /src "$IMAGE" \
          sh -c "gcc --version | head -1 && uname -m && \
-                gcc $STRICT_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc -lpthread && \
+                gcc $STRICT_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc $LDLIBS && \
                 /tmp/t_gcc" 2>&1 | tee "$log" \
        && assert_all_tests_ran "$log" "$platform"; then
         echo "== $platform: PASS =="
