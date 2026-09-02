@@ -12,11 +12,25 @@ publication path.
 
 ## Layout
 
-- `include/adce_platform.h` — single header, built on C11 `stdatomic.h` acquire/release.
-  No mutexes, no spinlocks, no allocation.
-- `test/t_adce_platform.c` — `t_*` unit tests: Q16.16 arithmetic (including overflow),
-  token-bucket clamping, RNG sanity, time monotonicity, single-threaded seqlock, and a
-  two-thread stress test.
+The codebase is no longer a single header. `adce_platform.h` remains header-only — every
+platform primitive, the Q16 lane, the RNG and the seqlock are `static inline` in it — but
+the Observation Plane has an out-of-line producer, so `src/` exists and both gates compile
+it.
+
+- `include/adce_platform.h` — header-only platform layer, built on C11 `stdatomic.h`
+  acquire/release. No mutexes, no spinlocks, no allocation.
+- `include/adce_observe.h` — Observation Plane types, the single tuning-constant block
+  (T, N, z_lo, z_hi, alpha, the sigma epsilon, the warmup length), and the inline
+  per-arrival tap. Pure functions on the publication path — squash, clamp, square root —
+  are inline here so the tests reach them without a running observer.
+- `src/adce_observe.c` — Observation Plane producer, off the arrival path: `adce_obs_init`,
+  `adce_obs_claim_writer`, `adce_obs_epoch_close`.
+- `test/t_adce_platform.c` — owns `main()` and the single runner table. `t_*` unit tests:
+  Q16.16 arithmetic (including overflow), token-bucket clamping, RNG sanity, time
+  monotonicity, single-threaded seqlock, and a two-thread stress test.
+- `test/t_adce_observe.c` — Observation Plane cases. Each is `static`, so the gate's
+  ran-tests guard finds it by source pattern, and each has one external forwarder that the
+  runner table in `t_adce_platform.c` registers.
 
 ## Locked decisions — do not change without stating a reason
 

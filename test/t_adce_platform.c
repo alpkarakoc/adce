@@ -288,6 +288,22 @@ static int test_seqlock_concurrent(void) {
     return 0;
 }
 
+/* Observation Plane cases. They live in test/t_adce_observe.c, where each is
+ * static so the gate's ran-tests guard can find it by source pattern; these
+ * are the external forwarders that internal linkage makes necessary to
+ * register them in the one runner table below. Each name here must match the
+ * suffix of its test_<name> definition over there, because that is the string
+ * the guard expects to see in this binary's output. */
+int adce_t_obs_sqrt(void);
+int adce_t_obs_ewma_update(void);
+int adce_t_obs_squash(void);
+int adce_t_obs_publication_clamp(void);
+int adce_t_obs_warmup(void);
+int adce_t_obs_writer_claim(void);
+int adce_t_obs_cadence(void);
+int adce_t_obs_determinism(void);
+int adce_t_obs_tap_counter(void);
+
 int main(void) {
     struct {
         const char *name;
@@ -301,6 +317,15 @@ int main(void) {
         {"epoch_state_lock_free", test_epoch_state_lock_free},
         {"seqlock_single_threaded", test_seqlock_single_threaded},
         {"seqlock_concurrent", test_seqlock_concurrent},
+        {"obs_sqrt", adce_t_obs_sqrt},
+        {"obs_ewma_update", adce_t_obs_ewma_update},
+        {"obs_squash", adce_t_obs_squash},
+        {"obs_publication_clamp", adce_t_obs_publication_clamp},
+        {"obs_warmup", adce_t_obs_warmup},
+        {"obs_writer_claim", adce_t_obs_writer_claim},
+        {"obs_cadence", adce_t_obs_cadence},
+        {"obs_determinism", adce_t_obs_determinism},
+        {"obs_tap_counter", adce_t_obs_tap_counter},
     };
 
     int failures = 0;

@@ -196,8 +196,19 @@ static inline uint64_t adce_now_ns(void) {
 #endif
 
 /* ===========================================================================
- * Fixed-point Q16.16 (Ingest and Enforcement planes only; the Observation
- * Plane is where floating point is permitted).
+ * Fixed-point Q16.16.
+ *
+ * A statement about which arithmetic each plane performs INTERNALLY, not
+ * about which types cross between them. Ingest and Enforcement compute in
+ * Q16.16; the Observation Plane computes in double -- mu, var and z are
+ * doubles owned by the observer thread and never shared.
+ *
+ * The Q16 conversion at the publish call IS the plane boundary. That is what
+ * reconciles this with adce_epoch_state_t below, whose `pressure` field the
+ * Observation Plane writes: the score is squashed to [0,1] and converted
+ * once, at adce_epoch_publish, and no floating-point value ever crosses into
+ * the publication object. See include/adce_observe.h and
+ * docs/observation-plane.md section 3.
  * ===========================================================================
  */
 
