@@ -22,7 +22,8 @@ set -euo pipefail
 cd "${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 IMAGE="${ADCE_GCC_IMAGE:-gcc:14}"
-SRC="test/t_adce_platform.c"
+OUT="$(mktemp -d)"
+trap 'rm -rf "$OUT"' EXIT
 
 # The same strict set as profile 1 of verify.sh, -pedantic and -Werror included.
 # Kept in sync by hand rather than shared through a common file: the two gates
@@ -30,6 +31,70 @@ SRC="test/t_adce_platform.c"
 # them into one.
 STRICT_FLAGS="-std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow"
 STRICT_FLAGS="$STRICT_FLAGS -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic"
+
+# --- source discovery -------------------------------------------------------
+# Each platform builds ONE binary from all of src/*.c plus all of test/t_*.c.
+# A hardcoded file list is what allowed this gate to report green while compiling
+# none of the new work, so the list is derived and an empty glob is a failure,
+# never a silent zero-file build. Duplicated from verify.sh by the same rule that
+# duplicates the flags above.
+#
+# Convention this enforces: exactly one test file defines main(). A second one is
+# a duplicate-symbol link error inside the container, which is the intended loud
+# outcome -- a new test registers its cases in the existing runner table.
+shopt -s nullglob
+TEST_SRCS=(test/t_*.c)
+LIB_SRCS=()
+if [ -d src ]; then LIB_SRCS=(src/*.c); fi
+shopt -u nullglob
+
+if [ ${#TEST_SRCS[@]} -eq 0 ]; then
+    echo "FAIL: test/t_*.c matched no files - there is nothing to verify" >&2
+    exit 1
+fi
+# src/ not existing yet is legal. An src/ that exists but holds no translation
+# unit is not: it means a file was deleted, misnamed, or never added.
+if [ -d src ] && [ ${#LIB_SRCS[@]} -eq 0 ]; then
+    echo "FAIL: src/ exists but src/*.c matched no files" >&2
+    exit 1
+fi
+
+# bash 3.2 (the macOS system bash) treats "${empty[@]}" under 'set -u' as an error.
+SRCS=(${LIB_SRCS[@]+"${LIB_SRCS[@]}"} "${TEST_SRCS[@]}")
+# Space-joined for the container's `sh -c`. Safe because these are repo-relative
+# paths under src/ and test/, which carry no spaces; the mount makes $PWD the
+# container's working directory, so the relative paths resolve unchanged.
+SRC_LIST="${SRCS[*]}"
+
+# --- "the tests actually ran" guard -----------------------------------------
+# The runner prints "TEST OK: <name>" for each case it executes. The expected set
+# is read out of the SOURCE -- every `static int test_<name>(void)` definition --
+# and not out of the binary. So a test file that compiles but is never wired into
+# the runner table still contributes expectations that no output line satisfies,
+# and the gate goes red. A t_*.c that defines no test at all is red as well, so
+# "registers nothing" is not reachable by writing nothing either.
+expected_tests() {
+    sed -n 's/^static int test_\([A-Za-z0-9_]*\)(void).*/\1/p' "$1"
+}
+
+assert_all_tests_ran() {
+    local log="$1" profile="$2" f name count bad=0
+    for f in "${TEST_SRCS[@]}"; do
+        count=0
+        while IFS= read -r name; do
+            count=$((count + 1))
+            if ! grep -qxF "TEST OK: $name" "$log"; then
+                echo "FAIL[$profile]: $f defines test_$name, but it never ran" >&2
+                bad=1
+            fi
+        done < <(expected_tests "$f")
+        if [ "$count" -eq 0 ]; then
+            echo "FAIL[$profile]: $f defines no 'static int test_<name>(void)' case" >&2
+            bad=1
+        fi
+    done
+    return "$bad"
+}
 
 # An unavailable Docker means the shipping target was NOT verified. Say so and
 # fail; reporting success here would be the single most misleading thing this
@@ -45,16 +110,22 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "== sources: $SRC_LIST =="
+
 # A string, not an array: macOS ships bash 3.2, where expanding an empty array
 # under 'set -u' is itself an error.
 failed=""
 
 for platform in linux/arm64 linux/amd64; do
     echo "== $platform ($IMAGE) =="
+    log="$OUT/log-$(printf '%s' "$platform" | tr / -)"
+    # The run is teed rather than left on the terminal so the ran-tests guard has
+    # the output to check; 'pipefail' keeps the container's exit status decisive.
     if docker run --rm --platform "$platform" -v "$PWD":/src:ro -w /src "$IMAGE" \
          sh -c "gcc --version | head -1 && uname -m && \
-                gcc $STRICT_FLAGS -Iinclude $SRC -o /tmp/t_gcc -lpthread && \
-                /tmp/t_gcc"; then
+                gcc $STRICT_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc -lpthread && \
+                /tmp/t_gcc" 2>&1 | tee "$log" \
+       && assert_all_tests_ran "$log" "$platform"; then
         echo "== $platform: PASS =="
     else
         echo "== $platform: FAIL ==" >&2
