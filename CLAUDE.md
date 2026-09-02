@@ -1,6 +1,6 @@
 # ADCE — Anomaly Detection & Stochastic Containment Engine
 
-Pure C11. No external dependencies. Target: lock-free, allocation-free, fail-closed
+C11 plus one named compiler extension (`__int128`). No external dependencies. Target: lock-free, allocation-free, fail-closed
 publication path.
 
 ## Commands
@@ -52,3 +52,18 @@ publication path.
 - Changing a public function's signature, return contract, or failure behaviour is an
   API decision. Propose it and wait for confirmation; never fold it into a step whose
   stated scope was something else.
+- `__int128` / `unsigned __int128` is a deliberate, load-bearing compiler extension, not
+  an oversight. `adce_q16_mul`, `adce_q16_div`, and the token bucket all need a width
+  above 64 bits, and `ADCE_Q16_MAX` is `INT64_MAX`, so a 16-bit left shift of a full-range
+  numerator does not fit in `int64_t`. The dependency is made explicit by the `#error`
+  guard at the top of the header. Do not "clean it up" — it cannot be removed without
+  narrowing the Q16 lane, which is a separate design decision.
+- Open risk, not yet verified: GCC emits a pedwarn for `__int128` under `-pedantic`, which
+  `-Werror` turns into a build failure. Clang does not, which is why profile 1 passes on
+  the macOS dev host. The shipping target has never been built. A Linux/GCC profile is
+  required before any release claim.
+- `adce_q16_div` with a zero divisor saturates toward the numerator's sign: negative
+  numerator yields `ADCE_Q16_MIN`, zero or positive yields `ADCE_Q16_MAX`. A collapsed
+  divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
+  `ADCE_Q16_MAX` by this rule. This is a fail-closed contract; changing it is an API
+  decision.
