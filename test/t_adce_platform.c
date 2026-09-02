@@ -42,6 +42,50 @@ static int test_q16_arithmetic(void) {
     return 0;
 }
 
+static int test_q16_boundaries(void) {
+    /* Negative operands. adce_q16_from_int must not left-shift a negative
+     * value (C11 6.5.7p4); UBSan fails the second profile if it does. */
+    ADCE_TEST_ASSERT(adce_q16_from_int(-1) == -ADCE_Q16_ONE);
+    ADCE_TEST_ASSERT(adce_q16_from_int(-7) == -7 * ADCE_Q16_ONE);
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_from_int(-7)) == -7);
+
+    /* INT32_MAX and INT32_MIN are the widest inputs the conversion accepts,
+     * so they are the largest and smallest values that can round-trip. Both
+     * must come back exact, not merely close. */
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_from_int(INT32_MAX)) == INT32_MAX);
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_from_int(INT32_MIN)) == INT32_MIN);
+    ADCE_TEST_ASSERT(adce_q16_from_int(INT32_MAX) ==
+                     ((adce_q16_t)INT32_MAX << ADCE_Q16_FRAC_BITS));
+    ADCE_TEST_ASSERT(adce_q16_from_int(INT32_MIN) == -((adce_q16_t)1 << 47));
+
+    /* Negative multiplication and division keep C's truncation toward zero. */
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_mul(adce_q16_from_int(-3),
+                                                  adce_q16_from_int(4))) == -12);
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_div(adce_q16_from_int(-12),
+                                                  adce_q16_from_int(4))) == -3);
+    ADCE_TEST_ASSERT(adce_q16_to_int(adce_q16_div(adce_q16_from_int(12),
+                                                  adce_q16_from_int(-4))) == -3);
+
+    /* Negative counterpart of the 10^12 overflow case in test_q16_arithmetic:
+     * the __int128 intermediate must carry it without wrapping. */
+    ADCE_TEST_ASSERT(adce_q16_mul(adce_q16_from_int(-1000000),
+                                  adce_q16_from_int(1000000)) ==
+                     -((adce_q16_t)1000000000000LL << ADCE_Q16_FRAC_BITS));
+
+    /* A zero divisor saturates toward the numerator's sign rather than
+     * executing a division by zero. */
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(1), 0) == ADCE_Q16_MAX);
+    ADCE_TEST_ASSERT(adce_q16_div(adce_q16_from_int(-1), 0) == ADCE_Q16_MIN);
+    ADCE_TEST_ASSERT(adce_q16_div(0, 0) == ADCE_Q16_MAX);
+
+    /* ADCE_Q16_MIN / -1 is +2^79, which no 64-bit lane holds: it must clamp
+     * to the maximum instead of narrowing silently. */
+    ADCE_TEST_ASSERT(adce_q16_div(ADCE_Q16_MIN, -1) == ADCE_Q16_MAX);
+    ADCE_TEST_ASSERT(adce_q16_div(ADCE_Q16_MAX, -1) == ADCE_Q16_MIN);
+
+    return 0;
+}
+
 static int test_token_bucket(void) {
     uint64_t capacity = (uint64_t)ADCE_Q16_ONE * 1000;
     uint64_t rate = (uint64_t)ADCE_Q16_ONE; /* 1 token (Q16) per ns */
@@ -165,6 +209,7 @@ int main(void) {
         int (*fn)(void);
     } tests[] = {
         {"q16_arithmetic", test_q16_arithmetic},
+        {"q16_boundaries", test_q16_boundaries},
         {"token_bucket", test_token_bucket},
         {"rng", test_rng},
         {"time_source", test_time_source},

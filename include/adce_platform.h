@@ -155,8 +155,18 @@ typedef int64_t adce_q16_t;
 #define ADCE_Q16_MAX ((adce_q16_t)INT64_MAX)
 #define ADCE_Q16_MIN ((adce_q16_t)INT64_MIN)
 
+/* No range rejection is possible on the way in: |INT32_MIN| << 16 is 2^47,
+ * far inside the int64_t lane, so a runtime check could never fire. The
+ * invariant is pinned here instead of paid for on every call. */
+_Static_assert(32 + ADCE_Q16_FRAC_BITS < 64,
+               "int32_t must fit the Q16.16 lane after the fractional shift");
+
 static inline adce_q16_t adce_q16_from_int(int32_t v) {
-    return (adce_q16_t)v << ADCE_Q16_FRAC_BITS;
+    /* Shift through unsigned width. Left-shifting a negative signed value is
+     * undefined (C11 6.5.7p4) regardless of what the target emits; the
+     * unsigned shift is defined mod 2^64 and converting back reproduces
+     * v * 2^16 exactly on two's-complement. */
+    return (adce_q16_t)((uint64_t)(int64_t)v << ADCE_Q16_FRAC_BITS);
 }
 
 static inline int32_t adce_q16_to_int(adce_q16_t v) {
@@ -177,8 +187,33 @@ static inline adce_q16_t adce_q16_mul(adce_q16_t a, adce_q16_t b) {
 }
 
 static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
-    __int128 wide = (__int128)a << ADCE_Q16_FRAC_BITS;
-    return (adce_q16_t)(wide / (__int128)b);
+    /* A zero divisor has no representable quotient. Saturate toward the
+     * numerator's sign -- the mathematical limit -- so a collapsed divisor
+     * reads as maximal rather than zero pressure downstream. */
+    if (b == 0) {
+        return a < 0 ? ADCE_Q16_MIN : ADCE_Q16_MAX;
+    }
+
+    /* Same unsigned-width detour as adce_q16_from_int, taken at __int128
+     * width so a full-range Q16.16 numerator keeps its precision. The cast
+     * back is implementation-defined, NOT undefined (C11 6.3.1.3p3): GCC and
+     * Clang both define an out-of-range unsigned->signed conversion as
+     * modular two's-complement wrap, which is the bit pattern relied on here.
+     */
+    __int128 wide =
+        (__int128)((unsigned __int128)(__int128)a << ADCE_Q16_FRAC_BITS);
+    __int128 q = wide / (__int128)b;
+
+    /* ADCE_Q16_MIN / -1 is +2^79. Widening before the divide keeps the
+     * division itself safe, but the quotient still outruns the 64-bit lane,
+     * so clamp it rather than narrow it silently. */
+    if (q > (__int128)ADCE_Q16_MAX) {
+        return ADCE_Q16_MAX;
+    }
+    if (q < (__int128)ADCE_Q16_MIN) {
+        return ADCE_Q16_MIN;
+    }
+    return (adce_q16_t)q;
 }
 
 static inline adce_q16_t adce_q16_min(adce_q16_t a, adce_q16_t b) {
