@@ -363,16 +363,20 @@ function takes the draw as a parameter:
 
 | Path | Contents | Why there |
 | --- | --- | --- |
-| `include/adce_enforce.h` | outcome enum, context type, constants, `adce_enf_should_shed()` pure inline, `adce_enf_admit()` inline | runs per arrival; the whole gate is hot path and must inline, like the tap |
-| `src/adce_enforce.c` | `adce_enf_thread_init` | once per thread; the entropy draw and its abort belong off the request path |
+| `include/adce_enforce.h` | outcome enum, context type, constants, `adce_enf_should_shed()`, `adce_enf_decide()`, `adce_enf_admit()`, `adce_enf_thread_init()` — all inline | runs per arrival; the whole gate is hot path and must inline, like the tap |
 | `test/t_adce_enforce.c` | the assertions in section 5 | first test file for this plane |
 | `docs/enforcement-plane.md` | this document | |
 
-Everything else is unchanged. Unlike the Observation Plane, this plane has almost no
-out-of-line surface — the gate is entirely inline — so `src/adce_enforce.c` exists for
-`adce_enf_thread_init` alone. If that turns out to be a one-liner, the file should be
-dropped rather than kept for symmetry; both gates already build `src/*.c` from a glob, so
-an empty `src/` is not a problem but an empty *file* is.
+**Resolved during implementation: `src/adce_enforce.c` does not exist.** This document
+originally placed `adce_enf_thread_init` there, on the reasoning that a once-per-thread
+entropy draw does not belong in a header. That is wrong, and the reason is the per-TU RNG
+noted at the top of this document. `adce_enf_admit` is inline, so it draws from the
+*calling* translation unit's `adce_rng_tls`. An out-of-line warmer in `src/adce_enforce.c`
+would seed the *enforcement* TU's stream — a different object no ingress path ever touches
+— leaving the lazy seed, and the `abort()` §1.4 exists to relocate, exactly where they
+were. The function would advertise a guarantee it silently fails to provide, which is worse
+than not having it. `adce_enf_thread_init` is therefore inline in the header alongside the
+gate that shares its stream, and this plane has no out-of-line surface at all.
 
 Test cases go in `test/t_adce_enforce.c` as `static int test_<name>(void)` with one external
 forwarder each, registered in the runner table in `t_adce_platform.c` — the convention

@@ -304,6 +304,17 @@ int adce_t_obs_cadence(void);
 int adce_t_obs_determinism(void);
 int adce_t_obs_tap_counter(void);
 
+/* Enforcement Plane cases, same convention: static in test/t_adce_enforce.c so
+ * the ran-tests guard sees them, forwarded here to reach this runner table. */
+int adce_t_enf_shed_mapping(void);
+int adce_t_enf_shed_monotone(void);
+int adce_t_enf_read_clamp(void);
+int adce_t_enf_stale_fallback(void);
+int adce_t_enf_cold_start(void);
+int adce_t_enf_bucket_ceiling(void);
+int adce_t_enf_determinism(void);
+int adce_t_enf_shed_fraction(void);
+
 int main(void) {
     struct {
         const char *name;
@@ -326,6 +337,14 @@ int main(void) {
         {"obs_cadence", adce_t_obs_cadence},
         {"obs_determinism", adce_t_obs_determinism},
         {"obs_tap_counter", adce_t_obs_tap_counter},
+        {"enf_shed_mapping", adce_t_enf_shed_mapping},
+        {"enf_shed_monotone", adce_t_enf_shed_monotone},
+        {"enf_read_clamp", adce_t_enf_read_clamp},
+        {"enf_stale_fallback", adce_t_enf_stale_fallback},
+        {"enf_cold_start", adce_t_enf_cold_start},
+        {"enf_bucket_ceiling", adce_t_enf_bucket_ceiling},
+        {"enf_determinism", adce_t_enf_determinism},
+        {"enf_shed_fraction", adce_t_enf_shed_fraction},
     };
 
     int failures = 0;
