@@ -31,9 +31,19 @@
 # ADCE_Q16_MIN negation guard, and the whole __int128 Q16 lane rests on the same
 # check. One compiler's silence on that is one compiler's opinion.
 #
+# Plus one timing profile: the strict -O2 binary confined to two logical CPUs
+# and run repeatedly, on the same linux/amd64-native condition. See the block
+# above that profile for what it does and does not reproduce.
+#
 # The emulated case SKIPS and says so, with its reason. A profile that skips
 # silently is worse than a profile that does not exist, because everyone believes
-# it ran.
+# it ran. Both conditional profiles share ONE native/emulated test --
+# platform_is_native below -- because two mechanisms answering the same question
+# is two things to get wrong. Their REASONS for skipping differ and are stated
+# separately: the sanitizer profile skips because emulation reports faults that
+# do not exist, and the pinned profile skips because under emulation the
+# scheduling being sampled is qemu's rather than the target's. False and
+# meaningless are not the same defect.
 set -euo pipefail
 
 cd "${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -74,6 +84,42 @@ LDLIBS="-lpthread -lm"
 # Adding it is a separate decision with its own reason.
 SAN_FLAGS="-std=c11 -O1 -g -fsanitize=address,undefined"
 SAN_FLAGS="$SAN_FLAGS -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+# --- the 2-CPU timing profile's knobs ---------------------------------------
+# How many times the pinned binary runs. The build happens once inside the same
+# container; rebuilding identical sources proves nothing and is the slow half.
+#
+# 5, and deliberately not a number derived from a target detection probability,
+# because no such number can honestly be computed here. CLAUDE.md carries the
+# full argument; the short form is that sizing a repeat count to a detection
+# probability requires a point estimate of the per-execution failure rate, that
+# estimate can only come from observed failures, and this suite is green. A green
+# suite yields an upper bound on the rate and never a point estimate. 5 is chosen
+# to make this profile a hunt rather than a gesture while staying proportionate
+# to a gate that already takes over a minute, and it is a round number, which is
+# said here rather than dressed up.
+ADCE_PIN_REPEAT="${ADCE_PIN_REPEAT:-5}"
+
+# Validated rather than trusted, for the reason verify.sh validates ADCE_REPEAT:
+# an empty or non-numeric value would run the binary zero times and still let the
+# profile report PASS, which is the one failure mode a verification gate must not
+# have.
+case "$ADCE_PIN_REPEAT" in
+    ''|*[!0-9]*)
+        echo "FAIL: ADCE_PIN_REPEAT must be a positive integer, got '$ADCE_PIN_REPEAT'" >&2
+        exit 1
+        ;;
+esac
+if [ "$ADCE_PIN_REPEAT" -lt 1 ]; then
+    echo "FAIL: ADCE_PIN_REPEAT must be at least 1, got '$ADCE_PIN_REPEAT'" >&2
+    exit 1
+fi
+
+# The two logical CPUs the profile is confined to. Fixed rather than
+# configurable: "two" is the entire claim this profile makes, and a knob would
+# invite running it with some other number and reporting the result under the
+# same name.
+ADCE_PIN_CPUS="0,1"
 
 # Which legs this host can run without emulation. macOS reports arm64 and Linux
 # reports aarch64 for the same hardware, so both spellings map to the same leg.
@@ -217,6 +263,69 @@ for platform in linux/arm64 linux/amd64; do
             echo "   ASan/UBSan under emulation report faults that do not exist on"
             echo "   real hardware. The profile runs where amd64 is native -- CI."
             echo "   GCC's sanitizers were NOT run by this invocation."
+        fi
+
+        # --- the 2-CPU timing profile ---------------------------------------
+        # WHY IT EXISTS. ADCE_REPEAT=10 in the CI workflow was derived from a
+        # per-execution failure rate of about 0.067, measured on 2-vCPU runners.
+        # GitHub widened those runners to 4 vCPU on 2026-09-03 and the 2-core
+        # configuration left the matrix, so the only timing bug this project has
+        # ever found was found on hardware that no longer exists in it.
+        #
+        # WHAT PINNING IS. --cpuset-cpus confines THIS CONTAINER's threads to two
+        # logical CPUs of a larger machine. The container's own nproc reports 2,
+        # which is echoed below so the constraint is evidence in the log rather
+        # than an assertion in a comment.
+        #
+        # WHAT PINNING IS NOT, and this is the part that must not be overstated:
+        # it is not a 2-vCPU machine. On a genuinely 2-vCPU runner the kernel,
+        # the runner agent and every other process compete for the same two CPUs.
+        # Here the rest of the system still has CPUs 2..n-1, and is not excluded
+        # from 0 and 1 either -- cpuset confines us to them, it does not reserve
+        # them for us. So this reproduces contention AMONG THIS BINARY's threads
+        # on two CPUs; it does not reproduce system-wide CPU scarcity.
+        #
+        # It therefore does not restore the lost coverage. It produces DIFFERENT
+        # coverage, and which of the two the phase race needed is UNKNOWN. There
+        # is exactly one observation of that race, run 33748342781, with no
+        # instrumentation of what the scheduler did, and the bug is fixed so no
+        # further samples can be drawn. One sample cannot separate "needed
+        # system-wide scarcity" from "needed intra-process contention on two
+        # CPUs", and this comment will not pretend otherwise.
+        #
+        # STRICT -O2, not a sanitized build, and that is not an oversight:
+        # CLAUDE.md records that the phase race appeared under strict and that
+        # ASan and TSan dilate execution enough to mask that entire class.
+        pinlog="$OUT/log-amd64-pin"
+        if platform_is_native "$platform"; then
+            echo "== $platform strict on cpus $ADCE_PIN_CPUS, x$ADCE_PIN_REPEAT (native $HOST_ARCH) =="
+            if docker run --rm --platform "$platform" --cpuset-cpus="$ADCE_PIN_CPUS" \
+                 -v "$PWD":/src:ro -w /src "$IMAGE" \
+                 sh -c "echo \"visible cpus: \$(nproc)\" && \
+                        gcc $STRICT_FLAGS -Iinclude $SRC_LIST -o /tmp/t_pin $LDLIBS && \
+                        i=1 && while [ \$i -le $ADCE_PIN_REPEAT ]; do \
+                          echo \"-- pinned run \$i/$ADCE_PIN_REPEAT --\"; \
+                          /tmp/t_pin || exit 1; \
+                          i=\$((i + 1)); \
+                        done" 2>&1 | tee "$pinlog" \
+               && assert_all_tests_ran "$pinlog" "$platform pinned"; then
+                echo "== $platform strict pinned: PASS =="
+            else
+                echo "== $platform strict pinned: FAIL ==" >&2
+                failed="$failed $platform/pinned"
+            fi
+        else
+            # Same condition as the sanitizer profile, different reason. That one
+            # skips because emulation reports faults that are not real; this one
+            # skips because under emulation the scheduling being sampled is
+            # qemu's, so a green result would say nothing about the target and a
+            # red one could not be attributed. Meaningless, not false.
+            echo "== $platform strict pinned to 2 CPUs: SKIPPED =="
+            echo "   this host is $HOST_ARCH, so linux/amd64 runs under qemu, and"
+            echo "   a timing profile under emulation samples the emulator's"
+            echo "   scheduler rather than the target's. The profile runs where"
+            echo "   amd64 is native -- CI."
+            echo "   The 2-CPU regime was NOT exercised by this invocation."
         fi
     fi
     echo

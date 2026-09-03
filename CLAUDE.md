@@ -172,6 +172,56 @@ it.
   strict profile under `taskset -c 0,1` or an equivalent — rather than relying on the
   runner being small. That is a gate change and belongs in its own commit with its own
   reason; it is not done here.
+- `verify-linux-gcc.sh` carries a 2-CPU timing profile: the strict `-O2` binary under
+  `docker run --cpuset-cpus=0,1`, run `ADCE_PIN_REPEAT` times (default 5). It is on the
+  linux/amd64 leg only and gated by the SAME `platform_is_native` test as the GCC sanitizer
+  profile, not a second mechanism. The reasons the two skip differ and are stated
+  separately: the sanitizer profile skips under emulation because qemu reports faults that
+  are not real, the pinned profile because under emulation the scheduling being sampled is
+  qemu's. False and meaningless are different defects. It is NOT in `verify.sh`: that gate
+  must stay runnable on the development machine, and macOS exposes no affinity API, so a
+  pinned profile there could never execute.
+- What that profile is and is not, because overstating it would recreate the problem it
+  exists to address. `--cpuset-cpus` confines THIS CONTAINER's threads to two logical CPUs
+  of a larger machine — the container's `nproc` reports 2, echoed into the log as evidence.
+  It is not a 2-vCPU machine. On a real 2-vCPU runner the kernel, the runner agent and
+  every other process contend for the same two CPUs; under cpuset the rest of the system
+  still has the other CPUs and is not excluded from ours either, since cpuset confines us
+  to 0 and 1 rather than reserving them for us. So it reproduces contention among this
+  binary's threads on two CPUs and does not reproduce system-wide CPU scarcity. **It does
+  not restore the lost coverage; it produces different coverage.** Which of the two the
+  phase race needed is UNKNOWN and is likely to stay that way: there is one observation of
+  it (run 33748342781), with no instrumentation of what the scheduler did, and the bug is
+  fixed, so no further samples can be drawn. One sample cannot separate the two.
+- The re-derivation of `ADCE_REPEAT` was attempted and FAILED, and 10 therefore stays a
+  round number. Recorded because a number with no basis that is presented as derived is
+  worse than one admitted to be arbitrary.
+
+  Structurally: sizing a repeat count to a target detection probability needs a POINT
+  ESTIMATE of the per-execution failure rate. A point estimate can only come from observed
+  failures. This suite is green, and a green suite yields only an upper bound — zero
+  failures in n executions puts the rate under roughly 3/n at 95% — never the estimate the
+  arithmetic requires.
+
+  No assertion in the suite can serve as a probe, and this was checked rather than assumed.
+  Every harness assertion is one of two shapes, and neither is sensitive. The deterministic
+  ones — `harness_check_gate_split`, the tap-order identity — run against frozen `now_ns`
+  fixtures and cannot vary with scheduling at all. The ceiling assertions are one-sided
+  (`admitted <= ceiling`), and scheduling pressure moves admitted DOWN, away from the
+  threshold rather than toward it. That leaves exactly one statistical assertion, the
+  stale-posture shed band, and it is deliberately insensitive: across 252 phase-samples
+  from 63 local executions, `live_pm` was 0 every single time and `blind_pm` stayed within
+  493–506 against a band of 420–580 and a required separation of 150. Its closest approach
+  to any threshold was 73 permille, on a band its own comment describes as over four sigma
+  wide. It is built not to flake, which is correct for an assertion and disqualifying for a
+  probe.
+
+  What WOULD re-derive it is fault injection: reinstating the phase race behind a build
+  flag and measuring its failure rate per configuration, which is the only route to a point
+  estimate for a bug that is fixed. That is a test change and belongs in its own commit with
+  its own reason. Until then the pinned profile answers a different and answerable question
+  — whether the suite is stable under a narrower scheduling regime — and not the one the
+  number 10 needs.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
