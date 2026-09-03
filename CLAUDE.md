@@ -216,12 +216,44 @@ it.
   wide. It is built not to flake, which is correct for an assertion and disqualifying for a
   probe.
 
-  What WOULD re-derive it is fault injection: reinstating the phase race behind a build
-  flag and measuring its failure rate per configuration, which is the only route to a point
-  estimate for a bug that is fixed. That is a test change and belongs in its own commit with
-  its own reason. Until then the pinned profile answers a different and answerable question
-  — whether the suite is stable under a narrower scheduling regime — and not the one the
-  number 10 needs.
+  The fault-injection calibration WAS run, in a scratch copy rather than as a committed
+  defect, and it did not separate the configurations. Method: copy the tree, revert 199c476
+  to reinstate the phase race, trim the runner to `harness_stale_posture` alone, build
+  strict `-O2` — the profile the original failure occurred in, confirmed from run
+  33748342781's log, which died at `harness_delta_stale(ps, phase) == arrivals` under
+  `== 1/3 strict build + run ==` — and run it 100 times under each configuration.
+
+  | configuration | cpus | failures | 95% CI on the rate |
+  |---|---|---|---|
+  | Darwin native | 8 | 0/100 | 0 – 2.95% |
+  | Docker linux/arm64, unpinned | 8 | 0/100 | 0 – 2.95% |
+  | Docker linux/arm64, `--cpuset-cpus=0,1` | 2 | 0/100 | 0 – 2.95% |
+
+  300 executions of a deliberately racy build, zero reproductions. **Pinning's sensitivity
+  to this class is therefore UNKNOWN, not recovered, and the pinned profile must not be
+  described as a better hunt than an unpinned one — nothing here shows it is.** It is worth
+  keeping for a different reason: it exercises a scheduling regime nothing else in the
+  matrix covers, at about 17 s, and breadth of regime is defensible on its own without a
+  measured detection rate behind it.
+
+  The more consequential finding is about the original number rather than the new profile.
+  0/100 bounds the rate below 2.95%, and the 2-vCPU estimate that `ADCE_REPEAT=10` rests on
+  was ONE failure in roughly 15 executions — a 95% interval of 0.34% to 27.9%. Those
+  intervals OVERLAP, so this campaign does not even establish that the old runners were more
+  sensitive than the configurations above. **The 0.067 was never a measurement; it was one
+  observation with a confidence interval spanning two orders of magnitude, and the ~87%
+  detection figure never followed from it.** So 10 is not a round number because GitHub
+  widened the runners — it was never derivable at all, and the runner change merely removed
+  the last reason to believe otherwise. Recorded because the earlier entry blamed the
+  hardware, and the hardware was not the problem.
+
+  Caveats that keep this from being stronger than it is: the scratch configurations are
+  arm64, containerised on Darwin, while the failing run was native x86_64 on bare CI, so
+  architecture, containerisation and host all differ alongside core count. And 100
+  executions cannot resolve a sub-1% event. This narrows what is known; it does not close
+  it. Reproducing the race at a measurable rate anywhere at all is the missing precondition
+  for any repeat count in this project having a basis, and no configuration reached for so
+  far provides it.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
