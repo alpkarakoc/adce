@@ -171,6 +171,15 @@ typedef struct {
     uint64_t epochs_closed;
     uint64_t publications;
 
+    /* Running total of arrivals folded into a closed epoch -- every epoch,
+     * warmup included, since adce_obs_epoch_close drains the counter before
+     * it knows whether warmup will suppress publication. This is the
+     * "sum(closed epoch arrivals)" term in the overrun identity:
+     *   tapped == arrivals_closed + discarded + residual
+     * (docs/enforcement-plane.md and the harness in t_adce_harness.c). Owned
+     * by the observer thread alone, same discipline as epochs_closed. */
+    uint64_t arrivals_closed;
+
     /* Diagnostic only, and deliberately not part of adce_epoch_state_t.
      * Overshoot magnitude is precisely what the hard clamp discards; routing
      * it forward to Enforcement would hand back the unbounded advice the

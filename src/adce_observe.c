@@ -102,6 +102,14 @@ int adce_obs_epoch_close(adce_obs_ctx_t *ctx, uint64_t observed_at_ns) {
     }
 
     arrivals = adce_obs_counter_take(ctx->counter);
+
+    /* Recorded before the warmup check below: warmup still drains the
+     * counter, so those arrivals are closed even though nothing publishes.
+     * Recording this after the warmup return would silently exclude every
+     * arrival in the first ADCE_OBS_WARMUP_EPOCHS epochs from the overrun
+     * identity. */
+    ctx->arrivals_closed += arrivals;
+
     rate = (double)arrivals / ADCE_OBS_EPOCH_SECONDS;
 
     /* Deviation against the PRIOR mean. Taking it against the updated mean
