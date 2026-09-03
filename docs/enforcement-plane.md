@@ -192,6 +192,19 @@ question a performance question rather than a safety one.
 Recommendation: read per arrival, measure, and only then consider caching. The cache is an
 optimisation with a real correctness trap attached, and nothing yet shows it is needed.
 
+**Measured, and the prediction held.** `test/t_adce_latency.c` now reports both halves on
+every run. On an Apple M3 (arm64, so `LDAR` and a real `DMB ISHLD`, the expensive case
+named above), strict `-O2`: the whole gate costs **~2.9–4.3 ns** depending on outcome,
+while `adce_now_ns` alone costs **~13 ns**. The clock read is therefore roughly three to
+four times the entire gate — seqlock read, clamp, shed test, refill and take together —
+and the paragraph above understated the gap rather than overstating it.
+
+That settles the caching question in the direction the argument predicted, and more
+strongly. Caching the snapshot to avoid the seqlock read would remove at most ~4 ns from a
+~17 ns path while the clock read it cannot avoid keeps the other ~13 ns, and it would buy
+that by taking on the correctness trap in the next paragraph. **Do not cache.** The
+measurement is what turns that from a preference into a finding.
+
 ## 3. Call ordering at an ingress site
 
 This is the project's core principle and it has not previously been written as an
@@ -400,8 +413,61 @@ function takes the draw as a parameter:
   `adce_rng_tls`, which the test TU cannot reach or seed. This is exactly why the pure
   decision function must take the draw as a parameter — it is the only way any of the
   above is testable at all.
-- Per-arrival latency: the clock read, the seqlock read, and whether the arm64 `DMB ISHLD`
-  changes the answer. Asserted nowhere; measured here.
+- **Per-arrival latency — measured, in `test/t_adce_latency.c`.** Reported per outcome,
+  never asserted: a latency threshold on a shared CI runner is a flake generator, and this
+  case runs in the per-edit gate. The only assertions are structural — that each fixture
+  drove the outcome it claims — so the case cannot fail on a slow or loaded host.
+
+  *Separating the gate from the clock read* needs no subtraction and no estimate. The
+  separation is already in the API: `adce_enf_admit(ctx, now_ns)` takes the time as a
+  parameter and never calls `adce_now_ns`, which belongs to the ingress site at step 1 of
+  §3. Timing the gate times the gate. `adce_now_ns` is then measured separately with the
+  same instrument, so both halves of per-arrival cost are measured numbers rather than one
+  measured and one assumed at the 20–25 ns in §2.
+
+  *Two instruments,* because the gate is smaller than the clock that must measure it —
+  `CLOCK_MONOTONIC_RAW` quantises to ~41.7 ns on Apple Silicon. A **batch** pair around
+  1024 calls amortises the clock away and resolves the central cost to picoseconds but
+  cannot see a tail; a **paired** pair around one call has a quantised floor and a
+  meaningless median but catches a microsecond outlier whole. The paired numbers are
+  printed next to an empty-pair baseline — two clock reads with nothing between them — so
+  the instrument's own distribution is visible beside the subject's.
+
+  *Result*, Apple M3, arm64 (`ADCE_CACHELINE == 128`, `LDAR` + `DMB ISHLD`), strict `-O2`,
+  280,576 calls per outcome:
+
+  | | batch p50 | batch p99 | batch max | paired max |
+  |---|---|---|---|---|
+  | `admit` (longest: read, clamp, shed test, refill, take) | ~4.0 ns | ~8.1 ns | ~9.1 ns | 333 ns |
+  | `shed` (shortest: read, clamp, shed test, return) | ~2.9 ns | ~3.0 ns | ~3.1 ns | 125 ns |
+  | `limit` (read, clamp, shed test, refill, failed take) | ~3.8 ns | ~4.2 ns | ~4.2 ns | 125 ns |
+  | `adce_now_ns`, for comparison — *not* part of the gate | ~13.0 ns | | | |
+  | empty clock pair — the instrument's own floor | | | | 84 ns |
+
+  Three things the table says that a mean would have hidden. The outcomes differ by ~40%
+  and rank exactly as their code paths predict, so averaging them would have buried the
+  one that does the most work. At p99 the gate is *below the clock's resolution* — the
+  paired p99 is 42 ns for the gate and 42 ns for an empty pair alike — so there is no
+  measurable p99 tail to report, which is a finding rather than a gap. And the paired
+  maxima do sit above the 84 ns floor, so a real tail exists; at this sample count it is
+  not separable from scheduler noise, and nothing here attributes it to a seqlock retry.
+
+  The batch figure is a **lower bound**: a tight loop keeps `ctx` and the epoch line in L1
+  with the branch predictors trained. A real ingress site interleaves request work and
+  will sometimes take a cold line.
+
+  Still open on this bullet: the x86_64 comparison. This is the arm64 number, which §2
+  called the expensive case; whether TSO's plain `MOV` and no-op fence measurably beat
+  `LDAR` + `DMB ISHLD` is answered by the same case running on the x86_64 CI runner, and
+  is not yet recorded here.
+
+  *A bound worth asserting, proposed and deliberately not folded in:* zero allocations and
+  zero syscalls per arrival. That is structural rather than temporal, so it holds
+  identically on a loaded runner and a quiet laptop and cannot flake — and it is what
+  actually protects the numbers above, since 4 ns drifting to 6 ns is noise whereas a
+  `malloc` or a futex appearing on the arrival path is a design regression that a timing
+  threshold would hide inside the variance. It needs an allocator interposer and a syscall
+  counter, neither of which exists in this repository yet.
 - Closed-loop behaviour: whether pressure and admitted rate settle or oscillate.
 - Observer death mid-flight: the watchdog trips, the fallback engages, and the system does
   not fail open.

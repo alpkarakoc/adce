@@ -324,6 +324,12 @@ int adce_t_harness_observer_lifecycle(void);
 int adce_t_harness_concurrent(void);
 int adce_t_harness_stale_posture(void);
 
+/* Per-arrival latency, in test/t_adce_latency.c. Same convention. It REPORTS
+ * numbers and asserts only that each fixture drove the outcome it claims, so it
+ * cannot fail on a slow or loaded host -- see that file's header for why a
+ * timing threshold is deliberately absent. */
+int adce_t_latency_per_arrival(void);
+
 int main(void) {
     struct {
         const char *name;
@@ -359,6 +365,7 @@ int main(void) {
         {"harness_observer_lifecycle", adce_t_harness_observer_lifecycle},
         {"harness_concurrent", adce_t_harness_concurrent},
         {"harness_stale_posture", adce_t_harness_stale_posture},
+        {"latency_per_arrival", adce_t_latency_per_arrival},
     };
 
     int failures = 0;
