@@ -30,25 +30,48 @@ permissions:
 
 jobs:
   sanitizers:
-    # Pinned, not ubuntu-latest. A gate whose toolchain moves under it stops
-    # meaning what it meant, and this one is load-bearing evidence about a
-    # memory model.
-    runs-on: ubuntu-24.04
+    # Both architectures, identical steps, so any divergence between them is
+    # attributable to the machine rather than to the workflow.
+    #
+    # arm64 is not a nice-to-have second opinion here, it is the STRICTER test.
+    # CLAUDE.md makes the local target the host architecture precisely because
+    # x86_64's TSO hides missing barriers that a weakly-ordered target exposes:
+    # code that passes on arm64 passes on x86_64, and the reverse does not hold.
+    # That made arm64 the authoritative concurrency evidence in this project
+    # while it ran on exactly one laptop. The qemu arm64 leg in
+    # verify-linux-gcc.sh does not substitute for it -- emulation proves
+    # compilation, not memory ordering.
+    #
+    # Both images pinned, not ubuntu-latest. A gate whose toolchain moves under
+    # it stops meaning what it meant, and this one is load-bearing evidence
+    # about a memory model.
+    strategy:
+      # The whole point is comparing the two, so one going red must not cancel
+      # the other and destroy the comparison.
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # Ubuntu 24.04 ships kernel 6.8, which defaults vm.mmap_rnd_bits to 32.
-      # LLVM's sanitizer runtimes cannot map their shadow regions against that
-      # much entropy and abort at startup with an unexpected-mapping error,
-      # before a single test runs. Lowering it is the standard workaround and
-      # affects only this runner's ASLR entropy, not the code under test.
+      # These runners default vm.mmap_rnd_bits high enough that LLVM's
+      # sanitizer runtimes cannot map their shadow regions against that much
+      # ASLR entropy, and abort at startup before a single test runs. Lowering
+      # it is the standard workaround and affects only this runner's entropy,
+      # not the code under test. Deliberately not tolerated with `|| true`: a
+      # sysctl that silently fails would leave the sanitizers to abort later
+      # with a much less obvious message.
       - name: Widen sanitizer address space
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
       # Recorded before the gate runs, so a green result is attributable to a
       # named toolchain rather than to whatever the image happened to carry.
+      # The two runners need not ship the same clang, and if they diverge that
+      # is worth seeing rather than assuming parity.
       - name: Toolchain
         run: |
           uname -srm
@@ -59,13 +82,10 @@ jobs:
       # CC=clang deliberately. verify.sh is the sanitizer gate and runs clang
       # locally on macOS, so keeping clang here means the CI result and the
       # local result are the same gate on a different machine, rather than two
-      # different gates. GCC on this platform is covered by the job below,
-      # which is now native rather than emulated.
+      # different gates. GCC is covered by the shipping-target job below.
       #
-      # This is the first execution of ASan, UBSan and TSan on real x86_64
-      # hardware, and the first execution of LeakSanitizer anywhere: verify.sh
-      # enables leak detection only on Linux, because Darwin has no LSan
-      # back end.
+      # On the arm64 runner this is TSan on real weakly-ordered hardware other
+      # than the developer's own machine, which is the reason the leg exists.
       - name: verify.sh (strict, asan+ubsan, tsan)
         env:
           CC: clang
