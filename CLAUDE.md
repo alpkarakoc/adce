@@ -103,17 +103,29 @@ it.
   barrier, which is why the local target is the host architecture. What changed is which
   leg is unattended: arm64 native TSan now runs only on a developer machine, because no CI
   job runs on arm64 hardware at all — the linux/arm64 leg is qemu under an x86_64 host.
+- arm64 now runs on CI hardware, not just a laptop. `ubuntu-24.04-arm`, Linux
+  6.17.0-1022-azure aarch64, 2 vCPU, all three `verify.sh` profiles under `Ubuntu clang
+  version 18.1.3 (1ubuntu1)`, TSan included and silent. Both runners carry the same clang,
+  so a future divergence between them is attributable to the machine rather than to the
+  toolchain — which is the only reason the comparison is worth anything.
+- What that run actually taught, and what an architecture-only evidence list hides: CORE
+  COUNT was the discriminating variable, not architecture. A phase-transition race in the
+  harness survived four green runs — a 4-core laptop and three 2-core CI runs — and
+  surfaced only when a 2-core runner stretched the window between a store and another
+  thread observing it. It appeared in the strict `-O2` profile, not under a sanitizer,
+  because ASan and TSan dilate execution and mask exactly this class. So "ran on arm64 and
+  on x86_64" is a weaker statement than it looks: both CI runners are 2 vCPU, no CI job has
+  ever run this code on more than two cores, and TSan cannot see a logical race at all.
+  Repeated execution under varied scheduling is what finds these, which is why the
+  scheduled run exists and why `ADCE_REPEAT` does.
 - Still unverified, in descending order of how much each would change a decision.
-  (1) No CI job runs on arm64 HARDWARE, so every arm64 sanitizer result in this project —
-  the evidence the bullet above calls authoritative — comes from one laptop. The
-  `verify-linux-gcc.sh` arm64 leg is qemu, which proves compilation, not memory ordering.
-  (2) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
-  every race result in this project is Clang's. (3) The Darwin half of
+  (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
+  every race result in this project is Clang's. (2) The Darwin half of
   `adce_platform_get_entropy` — the `getentropy` chunking loop — has no automated coverage
   at all: CI is Linux-only and takes the `getrandom` branch, so that code runs only on the
   development machine. No CI job runs macOS, which is the platform the per-edit gate runs
-  on. (4) Closed-loop behaviour — oscillation, settling, limit cycles — has no load model
-  and no evidence in either direction. (5) Per-arrival latency is measured nowhere, though
+  on. (3) Closed-loop behaviour — oscillation, settling, limit cycles — has no load model
+  and no evidence in either direction. (4) Per-arrival latency is measured nowhere, though
   `docs/enforcement-plane.md` §5 lists it as a harness deliverable. Separately, and by
   design rather than by omission: the `abort()` in `adce_rng_seed` has never executed, and
   cannot without fault injection.
