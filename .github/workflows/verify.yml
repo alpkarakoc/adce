@@ -29,6 +29,23 @@ on:
   schedule:
     - cron: "17 4 * * *"
 
+  # On demand, because the nightly is not re-runnable in the sense that matters.
+  # ADCE_REPEAT=10 is otherwise reachable only by waiting for 04:17 UTC, and if
+  # that run goes red there is no way to ask for another one -- re-running the
+  # failed job re-runs it with the schedule's context, but nothing lets you hunt
+  # harder, or hunt now, against a suspect commit.
+  #
+  # The default is the HUNTING value, not the fast one. A manual dispatch is a
+  # deliberate act; nobody reaches for this button wanting the same single pass
+  # that every push already ran. The per-edit and push paths keep their 1 by
+  # falling through the expression below.
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "ADCE_REPEAT -- times each profile's binary is re-run"
+        required: false
+        default: "10"
+
 # A superseded push should not keep burning a runner; the newest commit is the
 # only one whose result anyone acts on.
 concurrency:
@@ -98,7 +115,14 @@ jobs:
       # than the developer's own machine, which is the reason the leg exists.
       # ADCE_REPEAT re-runs each profile's BINARY, build untouched. 1 on push and
       # pull_request so the gate stays as fast as it is today; 10 on the nightly,
-      # where a couple of extra minutes buys a real hunt.
+      # where a couple of extra minutes buys a real hunt, and whatever the
+      # dispatcher asked for on a manual run.
+      #
+      # inputs.repeat is the empty string on every event that is not a dispatch,
+      # and GitHub treats '' as falsy, so the || chain falls through to the
+      # event-based default. A malformed result cannot go unnoticed: verify.sh
+      # rejects an empty or non-numeric ADCE_REPEAT before it builds anything,
+      # which is precisely the failure mode that validation was written for.
       #
       # 10 is derived, not round. On 2-core CI the harness has executed roughly
       # 15 times with one phase-race failure, so p is about 0.067 per execution.
@@ -109,7 +133,7 @@ jobs:
       - name: verify.sh (strict, asan+ubsan, tsan)
         env:
           CC: clang
-          ADCE_REPEAT: ${{ github.event_name == 'schedule' && '10' || '1' }}
+          ADCE_REPEAT: ${{ inputs.repeat || (github.event_name == 'schedule' && '10' || '1') }}
         run: ./scripts/verify.sh
 
   shipping-target:
