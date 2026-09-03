@@ -48,8 +48,27 @@ on:
 
 # A superseded push should not keep burning a runner; the newest commit is the
 # only one whose result anyone acts on.
+#
+# Keyed on the EVENT as well as the ref. Without that, every trigger for one ref
+# shares a group, and a workflow_dispatch cancels the push run it lands beside --
+# which happened: run 33771705510 (push, 916c8c0) was cancelled 21 seconds in by a
+# dispatch that arrived three seconds after it. That instance was harmless because
+# both ran the same SHA, and the dispatch verified it more thoroughly than the
+# push would have.
+#
+# What the old grouping could have hidden is the case where the SHAs DIFFER. Push
+# a commit, dispatch a run while it is still going, and the dispatch -- which
+# checks out whatever the ref points at when IT starts, not what the push carried
+# -- cancels the only run that was verifying the pushed commit. The record then
+# shows a green dispatch and a cancelled push for the same ref, and a commit that
+# nothing actually verified reads as covered. Cancelled runs are easy to skim past
+# precisely because they are not failures.
+#
+# Splitting by event keeps the original intent -- a newer push still cancels an
+# older push, a newer dispatch an older dispatch -- while letting the two kinds
+# coexist.
 concurrency:
-  group: verify-${{ github.ref }}
+  group: verify-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
