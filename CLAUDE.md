@@ -81,7 +81,9 @@ it.
   the diagnostic fires on bare casts too, so annotating declarations alone would not have
   covered it. `-pedantic` is intact.
 - Verified on real x86_64: GitHub Actions run 33742877639, green on the first attempt.
-  Runner `ubuntu-24.04`, Linux 6.17.0-1022-azure x86_64, 2 vCPU. All three `verify.sh`
+  Runner `ubuntu-24.04`, Linux 6.17.0-1022-azure x86_64, 2 vCPU AT THE TIME OF THAT RUN --
+  the standard runners were widened to 4 vCPU later the same day, as recorded below; this
+  line is the record of one run, not a standing property of the label. All three `verify.sh`
   profiles — strict, ASan+UBSan, TSan — executed natively under `Ubuntu clang version
   18.1.3 (1ubuntu1)`, and `verify-linux-gcc.sh`'s linux/amd64 leg ran natively under
   `gcc (GCC) 14.4.0`. The `ADCE_CACHELINE == 64` branch, `__builtin_ia32_pause` and the
