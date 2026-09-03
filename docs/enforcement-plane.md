@@ -316,6 +316,54 @@ maximal, per the locked rule. A reader that trusts the writer's clamp has no def
 against a torn or corrupted read, and the read side is where the plane boundary is actually
 crossed.
 
+### 4.1 The three routes into the stale verdict
+
+Crossing `ADCE_ADVICE_TIMEOUT_NS` is **not** the only way the gate reaches its conservative
+posture, and the other two are not faults. This was written after the integration harness
+measured them; before that, this section read as though ageing were the only route, and a
+reader seeing nonzero `stale_reads` on a healthy system had nothing to check it against.
+
+1. **Aged.** `adce_epoch_is_stale` is true because the last publication really is older than
+   the timeout. The observer is dead, descheduled, or behind. This is the route this section
+   was written for.
+2. **Torn.** `adce_epoch_read` returned 0 — the reader landed inside the writer's sequence
+   window — and `adce_enf_decide` takes the stale branch without consulting
+   `adce_epoch_is_stale` at all. No snapshot means no advice, which is the conservative
+   reading; retrying on the arrival path would be unbounded work for a value that is about
+   to be replaced anyway.
+3. **Future.** A publication landed between the caller's `adce_now_ns()` and the gate's
+   epoch read, so `observed_at_ns` exceeds the `now_ns` already captured. The subtraction in
+   `adce_epoch_is_stale` is unsigned, wraps to near `UINT64_MAX`, and the epoch reads as
+   maximally stale. This one was accidental and is now a contract, stated at the function
+   itself: **a future timestamp reads as maximally stale.** It is fail-closed in every case,
+   and changing that arithmetic — a signed difference, a saturating guard, an explicit
+   `observed_at_ns > now_ns` branch returning 0 — turns it fail-*open* exactly where the
+   reader cannot order the publication against its own clock.
+
+**Both 2 and 3 require a concurrent publication.** A sequential reader can straddle at most
+one publication at a time, so their combined count is bounded by *publications in the
+window*, never by arrivals. It does not grow with offered load. That is what distinguishes
+them from the posture genuinely engaging, and it is the bound the harness asserts rather
+than asserting zero.
+
+**Measured**, over the harness's live phase — publication healthy throughout, four ingress
+threads:
+
+| | |
+| --- | --- |
+| Arrivals | ~238,000 per thread, ~950,000 total |
+| Publications in the window | 27–28 |
+| Stale reads | 2–4 total, across all four threads |
+| Classified `aged` | **0**, in every instrumented run, max observed age 0 |
+| Classified `torn` | 2–4 — all of them |
+| Classified `future` | 0 in the live phase over ten runs; 1 across six whole runs |
+
+Close-to-close publication cadence peaked at 11.2 ms against the 50 ms timeout, so
+publication never came close to lapsing. **A nonzero `stale_reads` on a healthy system is
+therefore expected**, at roughly one per 300,000 arrivals here, and it is not evidence of an
+observer problem. What would be evidence is a count that scales with offered load rather
+than with publication count.
+
 ## 5. Testable now vs. needs a harness
 
 The boundary is drawn by one question: *does the property live inside a function, or in the

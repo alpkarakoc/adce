@@ -505,7 +505,37 @@ static inline int adce_epoch_read(const adce_epoch_state_t *state,
 
 /* Fail-closed watchdog: true when the last published epoch is stale enough
  * that the Enforcement Plane must stop trusting the Observation Plane's
- * advice and fall back to its most conservative posture. */
+ * advice and fall back to its most conservative posture.
+ *
+ * CONTRACT: a FUTURE observed_at_ns reads as maximally stale.
+ *
+ * The subtraction is unsigned and is deliberately not guarded. When
+ * observed_at_ns exceeds now_ns the difference wraps to a value near
+ * UINT64_MAX, which is greater than any timeout, so the epoch reads stale.
+ * That is the correct direction, and it is written down here as a contract
+ * rather than left as an accident of the arithmetic: a reader that cannot
+ * establish an ordering between the publication it read and the clock it read
+ * has no coherent view of time, and must not act on that publication.
+ *
+ * This is reachable in ordinary operation, not only under a broken clock. The
+ * ingress recipe in docs/enforcement-plane.md section 3 captures now_ns once
+ * and passes it into the gate, which then reads the epoch; a publication
+ * landing between those two steps carries a timestamp newer than the now_ns
+ * already in hand. Measured under the integration harness: rare -- one
+ * occurrence across six full runs -- but real, and it needs no fault to
+ * produce it.
+ *
+ * So anyone changing this arithmetic -- to a signed difference, to a
+ * saturating guard, or to an explicit observed_at_ns > now_ns branch that
+ * returns 0 -- converts that case from fail-closed to fail-OPEN, in precisely
+ * the situation where the reader is least entitled to an opinion. The wrap is
+ * load-bearing. Do not "fix" it.
+ *
+ * Ageing past ADCE_ADVICE_TIMEOUT_NS is therefore not the only route to the
+ * conservative posture, and this function is not the only place one is taken.
+ * A torn adce_epoch_read returns 0, and the gate treats no-snapshot as stale
+ * without consulting this function at all. All three routes are enumerated in
+ * docs/enforcement-plane.md section 4. */
 static inline int adce_epoch_is_stale(uint64_t observed_at_ns, uint64_t now_ns) {
     return (now_ns - observed_at_ns) > ADCE_ADVICE_TIMEOUT_NS;
 }
