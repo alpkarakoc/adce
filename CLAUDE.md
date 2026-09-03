@@ -80,9 +80,27 @@ it.
   is resolved by `__extension__` on the two typedefs, with every use routed through them:
   the diagnostic fires on bare casts too, so annotating declarations alone would not have
   covered it. `-pedantic` is intact.
-- Still unverified: no real x86_64 hardware has run this code. The amd64 profile is qemu
-  emulation, which proves compilation and test outcomes, not timing or memory-model
-  behaviour. The arm64 native TSan run remains the authoritative concurrency evidence.
+- Verified on real x86_64: GitHub Actions run 33742877639, green on the first attempt.
+  Runner `ubuntu-24.04`, Linux 6.17.0-1022-azure x86_64, 2 vCPU. All three `verify.sh`
+  profiles — strict, ASan+UBSan, TSan — executed natively under `Ubuntu clang version
+  18.1.3 (1ubuntu1)`, and `verify-linux-gcc.sh`'s linux/amd64 leg ran natively under
+  `gcc (GCC) 14.4.0`. The `ADCE_CACHELINE == 64` branch, `__builtin_ia32_pause` and the
+  64-byte `_Static_assert`s have therefore now been RUN under sanitizers on the shipping
+  architecture rather than only compiled for it. LeakSanitizer executed for the first time
+  in this project's history — `verify.sh` enables it only on Linux, and Darwin has no LSan
+  back end — and reported nothing; neither did UBSan or TSan.
+- This does NOT retire the arm64 evidence, and reading it that way inverts the argument.
+  x86_64 is TSO and is the weaker test; arm64's weak ordering is what can expose a missing
+  barrier, which is why the local target is the host architecture. What changed is which
+  leg is unattended: arm64 native TSan now runs only on a developer machine, because no CI
+  job runs on arm64 hardware at all — the linux/arm64 leg is qemu under an x86_64 host.
+- Still unverified, in descending order of how much each would change a decision. GCC's
+  sanitizers run NOWHERE: the CI sanitizer job pins `CC=clang`, `verify-linux-gcc.sh`
+  deliberately carries none, and the two compilers do not report identical UBSan findings.
+  No CI job runs on arm64 hardware, so every arm64 sanitizer result in this project comes
+  from one laptop. Closed-loop behaviour — oscillation, settling, limit cycles — has no
+  load model and no evidence in either direction. Per-arrival latency is measured nowhere,
+  though `docs/enforcement-plane.md` §5 lists it as a harness deliverable.
 - `adce_q16_div` with a zero divisor saturates toward the numerator's sign: negative
   numerator yields `ADCE_Q16_MIN`, zero or positive yields `ADCE_Q16_MAX`. A collapsed
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
