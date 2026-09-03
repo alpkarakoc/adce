@@ -322,6 +322,7 @@ int adce_t_harness_tap_before_gate(void);
 int adce_t_harness_tap_after_gate(void);
 int adce_t_harness_observer_lifecycle(void);
 int adce_t_harness_concurrent(void);
+int adce_t_harness_stale_posture(void);
 
 int main(void) {
     struct {
@@ -357,6 +358,7 @@ int main(void) {
         {"harness_tap_after_gate", adce_t_harness_tap_after_gate},
         {"harness_observer_lifecycle", adce_t_harness_observer_lifecycle},
         {"harness_concurrent", adce_t_harness_concurrent},
+        {"harness_stale_posture", adce_t_harness_stale_posture},
     };
 
     int failures = 0;

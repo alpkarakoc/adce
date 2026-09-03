@@ -522,6 +522,573 @@ static int test_harness_concurrent(void) {
 }
 
 /* =====================================================================
+ * The fail-closed path: what the system does when publication stops.
+ *
+ * docs/enforcement-plane.md section 4 makes four claims about the stale
+ * window and section 5 lists "observer death mid-flight" as needing this
+ * harness. Until now none of them had executable evidence.
+ *
+ * WHY THIS RUNS ITS OWN CLOSE LOOP instead of stalling the library observer.
+ * A stall-injection hook in src/adce_obs_thread.c would be a shipped API that
+ * stops publication in a production binary -- an attack surface bolted onto
+ * the very defence the watchdog exists to provide, and section 4 already notes
+ * that "anyone who can stall or kill it turns containment off completely".
+ * So the harness drives the plane itself, calling adce_obs_epoch_close with a
+ * clock it owns. That call takes observed_at_ns as a PARAMETER precisely so
+ * this is possible; see adce_observe.h. The library observer thread is not
+ * used here at all.
+ *
+ * The closer is ONE long-lived thread whose publishing is gated, rather than a
+ * thread that is stopped and a second one started. adce_obs_claim_writer is a
+ * one-way latch -- writer_claimed goes 0 -> 1 -> 2 and is never released, and
+ * the ownership test compares pthread_self() -- so a replacement thread would
+ * be refused the claim, take the -1 path on every close, and publish nothing
+ * while still looking alive. Re-initialising the context instead would reset
+ * epochs_closed and impose a fresh 100-epoch warmup blackout on recovery,
+ * which would test the cold start rather than the recovery. Gating the
+ * publication stops publication, which is the variable under test.
+ * ===================================================================== */
+
+#define HARNESS_STALE_THREADS 4
+#define HARNESS_STALE_BATCH 256
+#define HARNESS_STALE_PACE_NS (250ULL * 1000ULL)
+#define HARNESS_CLOSER_TICK_NS (1000ULL * 1000ULL)
+
+#define HARNESS_SETTLE_NS (ADCE_OBS_EPOCH_NS * 20ULL)
+#define HARNESS_LIVE_NS (ADCE_OBS_EPOCH_NS * 30ULL)
+/* The advice timeout plus margin: the window in which the last publication is
+ * ageing but has not yet crossed ADCE_ADVICE_TIMEOUT_NS. Reads here are fresh
+ * then stale, so it is measured for the ceiling and asserted for nothing else. */
+#define HARNESS_AGING_NS (ADCE_ADVICE_TIMEOUT_NS + ADCE_OBS_EPOCH_NS * 3ULL)
+#define HARNESS_BLIND_SLICE_NS (ADCE_OBS_EPOCH_NS * 12ULL)
+#define HARNESS_RECOVER_NS (ADCE_OBS_EPOCH_NS * 30ULL)
+#define HARNESS_STALE_WAIT_NS (15ULL * 1000ULL * 1000ULL * 1000ULL)
+
+/* Shedding under ADCE_ENF_STALE_PRESSURE is exactly p = 1/2: the test is
+ * (draw >> 48) < 32768 over 65536 uniform buckets. Asserted as a band rather
+ * than a point because the draws are real -- this is the ingress TU's actual
+ * adce_rng_tls, which no test can seed (section 1.3). At roughly 30k arrivals
+ * per thread per slice the band below is over four sigma wide. */
+#define HARNESS_STALE_BAND_LO 420ULL
+#define HARNESS_STALE_BAND_HI 580ULL
+/* The live band. Published pressure under steady load settles at zero, so the
+ * shed fraction is essentially nil; the allowance is for the occasional
+ * legitimate z > z_lo excursion from scheduler jitter in the arrival rate. It
+ * is deliberately far below the stale band, and the separation is asserted
+ * too, so no run can satisfy both. */
+#define HARNESS_LIVE_BAND_HI 250ULL
+#define HARNESS_BAND_SEPARATION 150ULL
+
+enum {
+    HARNESS_PH_PRIME = 0,  /* warmup; nothing published yet, nothing asserted */
+    HARNESS_PH_LIVE,       /* publishing and settled */
+    HARNESS_PH_AGING,      /* publication frozen, still inside the timeout */
+    HARNESS_PH_BLIND_A,
+    HARNESS_PH_BLIND_B,
+    HARNESS_PH_BLIND_C,
+    /* The thaw is its own window for the same reason the ageing one is: from
+     * enabling the closer to observing a fresh publication, reads cross back
+     * from stale to fresh. Arrivals in there belong to neither posture, so
+     * they are measured for the ceiling and asserted for nothing else.
+     * Without it, the recovered arrivals landed inside BLIND_C's delta and
+     * broke "every read in a blind phase is stale" -- correctly. */
+    HARNESS_PH_THAWING,
+    HARNESS_PH_RECOVERED,
+    HARNESS_PH_END,        /* sentinel: final snapshot, then the loop exits */
+    HARNESS_PH_COUNT
+};
+
+typedef struct {
+    uint64_t at_ns;
+    uint64_t tapped;
+    uint64_t admitted;
+    uint64_t shed;
+    uint64_t limit;
+    uint64_t stale;
+} harness_snap_t;
+
+/* Composition rather than extra fields on harness_site_t: the ordering cases
+ * above share that type and have no phases. */
+typedef struct {
+    harness_site_t site;
+    harness_snap_t snap[HARNESS_PH_COUNT];
+    int observed_phase;
+} harness_phased_t;
+
+static adce_obs_counter_t g_st_counter;
+static adce_epoch_state_t g_st_epoch;
+static adce_obs_ctx_t g_st_obs;
+static harness_phased_t g_st_sites[HARNESS_STALE_THREADS];
+
+static _Atomic int g_st_phase;
+static _Atomic int g_st_closer_run;
+static _Atomic int g_st_closing;  /* the gate: 1 publishes, 0 freezes */
+static _Atomic int g_st_thaw;     /* set with g_st_closing on resume */
+static _Atomic int g_st_ready;
+
+static void harness_snap_take(harness_snap_t *snap, const harness_site_t *site) {
+    snap->at_ns = adce_now_ns();
+    snap->tapped = site->tapped;
+    snap->admitted = site->enf.admitted;
+    snap->shed = site->enf.dropped_shed;
+    snap->limit = site->enf.dropped_limit;
+    snap->stale = site->enf.stale_reads;
+}
+
+static uint64_t harness_permille(uint64_t part, uint64_t whole) {
+    return whole == 0 ? 0 : (part * 1000ULL) / whole;
+}
+
+/* The harness's own Observation Plane driver. Everything it does with the
+ * plane is one call; the rest is cadence, which is the half this test needs to
+ * control. */
+static void *harness_closer_main(void *arg) {
+    uint64_t deadline_ns;
+
+    (void)arg;
+
+    /* On this thread, because the claim records pthread_self() as owner. */
+    if (!adce_obs_claim_writer(&g_st_obs)) {
+        atomic_store_explicit(&g_st_ready, -1, memory_order_release);
+        return NULL;
+    }
+
+    deadline_ns = adce_now_ns() + ADCE_OBS_EPOCH_NS;
+    atomic_store_explicit(&g_st_ready, 1, memory_order_release);
+
+    while (atomic_load_explicit(&g_st_closer_run, memory_order_acquire)) {
+        uint64_t now_ns = adce_now_ns();
+
+        if (now_ns >= deadline_ns) {
+            if (atomic_load_explicit(&g_st_closing, memory_order_acquire)) {
+                /* On thaw, drop the backlog before closing anything. Nothing
+                 * drained the counter while publication was frozen, so it now
+                 * holds several hundred milliseconds of arrivals; handing that
+                 * to one epoch would divide a multi-epoch total by a single T
+                 * and manufacture a rate spike out of the freeze itself,
+                 * saturating the squash and holding pressure at maximum for
+                 * the whole of the recovery this test is trying to measure.
+                 * This is the same missed-epoch policy the shipped observer
+                 * applies in src/adce_obs_thread.c, applied for the same
+                 * reason. */
+                if (atomic_exchange_explicit(&g_st_thaw, 0,
+                                             memory_order_acq_rel)) {
+                    (void)adce_obs_counter_take(g_st_obs.counter);
+                }
+                (void)adce_obs_epoch_close(&g_st_obs, now_ns);
+            }
+            deadline_ns = now_ns + ADCE_OBS_EPOCH_NS;
+        }
+
+        harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+    }
+
+    return NULL;
+}
+
+static void *harness_stale_ingress_main(void *arg) {
+    harness_phased_t *ps = (harness_phased_t *)arg;
+
+    adce_enf_thread_init(&ps->site.enf, &g_st_epoch, adce_now_ns());
+    harness_snap_take(&ps->snap[HARNESS_PH_PRIME], &ps->site);
+
+    for (;;) {
+        int phase = atomic_load_explicit(&g_st_phase, memory_order_acquire);
+        int b;
+
+        /* One snapshot per phase crossed, even if several were crossed between
+         * two batches. A phase this thread stepped straight over then shows a
+         * zero-length delta, and the assertions below reject a zero-arrival
+         * phase rather than passing it vacuously. */
+        while (ps->observed_phase < phase) {
+            ps->observed_phase++;
+            harness_snap_take(&ps->snap[ps->observed_phase], &ps->site);
+        }
+
+        if (ps->observed_phase >= HARNESS_PH_END) {
+            break;
+        }
+
+        for (b = 0; b < HARNESS_STALE_BATCH; ++b) {
+            ingress_correct(&ps->site, adce_now_ns());
+        }
+        harness_sleep_ns(HARNESS_STALE_PACE_NS);
+    }
+
+    return NULL;
+}
+
+/* Advances the phase and holds it for dur_ns. Separate from the sampling
+ * helper below because the ageing phase is measured but not asserted. */
+static void harness_phase_hold(int phase, uint64_t dur_ns) {
+    atomic_store_explicit(&g_st_phase, phase, memory_order_release);
+    harness_sleep_ns(dur_ns);
+}
+
+/* Holds a phase while continuously checking, through the seqlock, that the
+ * published epoch has not moved and still reads stale. This is requirement 1
+ * as a sustained property rather than a single sample: "becomes true and STAYS
+ * true". The poll is also a third concurrent reader against the ingress
+ * threads. */
+static int harness_phase_watch_stale(int phase, uint64_t dur_ns,
+                                     uint64_t frozen_at_ns) {
+    uint64_t end_ns;
+
+    atomic_store_explicit(&g_st_phase, phase, memory_order_release);
+    end_ns = adce_now_ns() + dur_ns;
+
+    while (adce_now_ns() < end_ns) {
+        adce_q16_t pressure;
+        uint64_t epoch_id;
+        uint64_t observed_at_ns;
+
+        if (adce_epoch_read(&g_st_epoch, &pressure, &epoch_id,
+                            &observed_at_ns)) {
+            /* Publication really has stopped: the timestamp has not advanced
+             * since the freeze. */
+            ADCE_TEST_ASSERT(observed_at_ns == frozen_at_ns);
+            ADCE_TEST_ASSERT(adce_epoch_is_stale(observed_at_ns,
+                                                 adce_now_ns()) == 1);
+        }
+        harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+    }
+
+    return 0;
+}
+
+/* Per-phase deltas for one site. */
+static uint64_t harness_delta_arrivals(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].tapped - ps->snap[phase].tapped;
+}
+
+static uint64_t harness_delta_shed(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].shed - ps->snap[phase].shed;
+}
+
+static uint64_t harness_delta_stale(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].stale - ps->snap[phase].stale;
+}
+
+/* An upper bound on how many publications a phase could have contained. The
+ * closer sets its next deadline to now + T after every close, so its cadence is
+ * at least T and a window of duration D holds at most D/T of them; the +1
+ * covers the partial epoch at each edge. */
+static uint64_t harness_publications_bound(const harness_phased_t *ps,
+                                           int phase) {
+    uint64_t dur_ns = ps->snap[phase + 1].at_ns - ps->snap[phase].at_ns;
+    return dur_ns / ADCE_OBS_EPOCH_NS + 1;
+}
+
+/* The absolute ceiling over an arbitrary window: rate * elapsed, plus one full
+ * bucket for the burst the window may have opened with. Independent of
+ * pressure by design (section 1.2), which is exactly why it is the thing that
+ * still bounds volume while the detector is blind. */
+static uint64_t harness_ceiling(const harness_phased_t *ps, int from, int to) {
+    uint64_t elapsed_ns = ps->snap[to].at_ns - ps->snap[from].at_ns;
+    return (ADCE_ENF_RATE_Q16_PER_NS * elapsed_ns + ADCE_ENF_CAPACITY_Q16) /
+           ADCE_ENF_COST_Q16;
+}
+
+static uint64_t harness_delta_admitted(const harness_phased_t *ps, int from,
+                                       int to) {
+    return ps->snap[to].admitted - ps->snap[from].admitted;
+}
+
+/* A live phase: the detector is publishing, so nothing reads stale and the
+ * shed fraction sits in the live band. */
+static int harness_check_live_phase(const harness_phased_t *ps, int phase,
+                                    const char *label) {
+    uint64_t arrivals = harness_delta_arrivals(ps, phase);
+    uint64_t permille;
+
+    /* A phase this thread produced nothing in would satisfy every band below
+     * vacuously, so an empty phase is a failure rather than a pass. */
+    ADCE_TEST_ASSERT(arrivals > 0);
+
+    /* Requirement 2, the "was zero before it" half -- but bounded by
+     * publications rather than asserted at exactly zero, and the difference is
+     * a measurement, not a convenience.
+     *
+     * Instrumenting adce_enf_decide to classify every live-phase stale read
+     * showed the aged count is zero: across runs, not one of them came from an
+     * epoch that had actually crossed ADCE_ADVICE_TIMEOUT_NS, and the maximum
+     * age observed on the stale branch was 0. Close-to-close cadence peaked at
+     * 11.2 ms against a 50 ms timeout, so publication never lapsed. The handful
+     * that do occur have exactly two causes, both of them this design working:
+     *
+     *   - a TORN read. adce_epoch_read returned 0 because the reader landed
+     *     inside the writer's sequence window, and adce_enf_decide treats that
+     *     as stale on purpose -- "no snapshot means no advice, which is the
+     *     conservative reading".
+     *   - a publication landing between the caller's adce_now_ns() and the
+     *     epoch read inside the gate, which makes observed_at_ns exceed the
+     *     now_ns already captured. adce_epoch_is_stale subtracts those as
+     *     uint64_t, so it underflows to an enormous age and reads stale.
+     *
+     * Both are fail-closed and both require a CONCURRENT PUBLICATION, and a
+     * sequential thread can straddle at most one publication at a time. So the
+     * count is bounded by publications in the window, never by arrivals -- it
+     * does not grow with offered load, which is what distinguishes it from the
+     * posture actually engaging. Asserting == 0 would be asserting that the
+     * seqlock never tears and that no publish ever lands in the read window,
+     * neither of which this design claims. */
+    ADCE_TEST_ASSERT(harness_delta_stale(ps, phase) <=
+                     harness_publications_bound(ps, phase));
+
+    /* And the same fact stated against the load: to the resolution the run
+     * measures, still zero -- against 1000 for a blind phase. */
+    ADCE_TEST_ASSERT(harness_permille(harness_delta_stale(ps, phase),
+                                      arrivals) == 0);
+
+    permille = harness_permille(harness_delta_shed(ps, phase), arrivals);
+    if (permille > HARNESS_LIVE_BAND_HI) {
+        fprintf(stderr, "FAIL: %s shed=%llu permille exceeds live band\n",
+                label, (unsigned long long)permille);
+        return 1;
+    }
+
+    return 0;
+}
+
+/* A blind phase: publication has stopped and the timeout has passed, so every
+ * read is stale and ADCE_ENF_STALE_PRESSURE is what the gate sheds on. */
+static int harness_check_blind_phase(const harness_phased_t *ps, int phase,
+                                     const char *label) {
+    uint64_t arrivals = harness_delta_arrivals(ps, phase);
+    uint64_t permille;
+
+    ADCE_TEST_ASSERT(arrivals > 0);
+
+    /* Requirement 2, the "climbs once the timeout passes" half. Every arrival,
+     * not merely some: the window is entirely past ADCE_ADVICE_TIMEOUT_NS. */
+    ADCE_TEST_ASSERT(harness_delta_stale(ps, phase) == arrivals);
+
+    /* Requirement 3. The band, not a point value. */
+    permille = harness_permille(harness_delta_shed(ps, phase), arrivals);
+    if (permille < HARNESS_STALE_BAND_LO || permille > HARNESS_STALE_BAND_HI) {
+        fprintf(stderr, "FAIL: %s shed=%llu permille outside stale band\n",
+                label, (unsigned long long)permille);
+        return 1;
+    }
+
+    /* Requirement 4, per slice. The stale posture sheds probabilistically, so
+     * within the blind window this bucket is the only thing bounding absolute
+     * volume -- and it does not consult the epoch state at all, which is what
+     * makes a non-maximal fallback safe (section 4). */
+    ADCE_TEST_ASSERT(harness_delta_admitted(ps, phase, phase + 1) <=
+                     harness_ceiling(ps, phase, phase + 1));
+
+    return 0;
+}
+
+static int test_harness_stale_posture(void) {
+    pthread_t closer;
+    pthread_t ingress[HARNESS_STALE_THREADS];
+    size_t i;
+    int ready;
+    int published = 0;
+    int recovered = 0;
+    uint64_t deadline_ns;
+    uint64_t frozen_at_ns = 0;
+    adce_q16_t pressure = 0;
+    uint64_t epoch_id = 0;
+    uint64_t observed_at_ns = 0;
+
+    memset(&g_st_counter, 0, sizeof(g_st_counter));
+    memset(&g_st_epoch, 0, sizeof(g_st_epoch));
+    adce_obs_init(&g_st_obs, &g_st_counter, &g_st_epoch);
+
+    for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
+        memset(&g_st_sites[i], 0, sizeof(g_st_sites[i]));
+        g_st_sites[i].site.counter = &g_st_counter;
+    }
+
+    atomic_store_explicit(&g_st_phase, HARNESS_PH_PRIME, memory_order_release);
+    atomic_store_explicit(&g_st_closer_run, 1, memory_order_release);
+    atomic_store_explicit(&g_st_closing, 1, memory_order_release);
+    atomic_store_explicit(&g_st_thaw, 0, memory_order_release);
+    atomic_store_explicit(&g_st_ready, 0, memory_order_release);
+
+    ADCE_TEST_ASSERT(pthread_create(&closer, NULL, harness_closer_main,
+                                    NULL) == 0);
+    while ((ready = atomic_load_explicit(&g_st_ready,
+                                         memory_order_acquire)) == 0) {
+        harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+    }
+    ADCE_TEST_ASSERT(ready == 1);
+
+    for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
+        ADCE_TEST_ASSERT(pthread_create(&ingress[i], NULL,
+                                        harness_stale_ingress_main,
+                                        &g_st_sites[i]) == 0);
+    }
+
+    /* Warmup: ADCE_OBS_WARMUP_EPOCHS closes before anything is published, and
+     * every arrival until then reads stale -- the cold-start posture, which is
+     * why HARNESS_PH_PRIME is measured but asserted only for the ceiling. */
+    deadline_ns = adce_now_ns() + HARNESS_STALE_WAIT_NS;
+    while (adce_now_ns() < deadline_ns) {
+        if (adce_epoch_read(&g_st_epoch, &pressure, &epoch_id,
+                            &observed_at_ns) &&
+            epoch_id != 0) {
+            published = 1;
+            break;
+        }
+        harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+    }
+    ADCE_TEST_ASSERT(published == 1);
+
+    /* Let the EWMA settle against the offered rate before measuring the live
+     * band; the epochs immediately after warmup still carry the transient. */
+    harness_sleep_ns(HARNESS_SETTLE_NS);
+
+    harness_phase_hold(HARNESS_PH_LIVE, HARNESS_LIVE_NS);
+
+    ADCE_TEST_ASSERT(adce_epoch_read(&g_st_epoch, &pressure, &epoch_id,
+                                     &observed_at_ns) == 1);
+    ADCE_TEST_ASSERT(adce_epoch_is_stale(observed_at_ns, adce_now_ns()) == 0);
+    frozen_at_ns = observed_at_ns;
+
+    /* THE FREEZE. The closer keeps running and keeps its writer claim; it
+     * simply stops calling adce_obs_epoch_close, so nothing is published and
+     * observed_at_ns stops advancing. */
+    atomic_store_explicit(&g_st_closing, 0, memory_order_release);
+
+    /* Ageing: past the last publication but not yet past the advice timeout.
+     * Reads cross from fresh to stale somewhere inside this window, so it is
+     * asserted for the ceiling only. */
+    harness_phase_hold(HARNESS_PH_AGING, HARNESS_AGING_NS);
+
+    /* Requirement 1: stale becomes true and STAYS true, and the published
+     * timestamp does not move, for the whole blind window. */
+    frozen_at_ns = 0;
+    ADCE_TEST_ASSERT(adce_epoch_read(&g_st_epoch, &pressure, &epoch_id,
+                                     &observed_at_ns) == 1);
+    frozen_at_ns = observed_at_ns;
+    ADCE_TEST_ASSERT(adce_epoch_is_stale(frozen_at_ns, adce_now_ns()) == 1);
+
+    ADCE_TEST_ASSERT(harness_phase_watch_stale(HARNESS_PH_BLIND_A,
+                                               HARNESS_BLIND_SLICE_NS,
+                                               frozen_at_ns) == 0);
+    ADCE_TEST_ASSERT(harness_phase_watch_stale(HARNESS_PH_BLIND_B,
+                                               HARNESS_BLIND_SLICE_NS,
+                                               frozen_at_ns) == 0);
+    ADCE_TEST_ASSERT(harness_phase_watch_stale(HARNESS_PH_BLIND_C,
+                                               HARNESS_BLIND_SLICE_NS,
+                                               frozen_at_ns) == 0);
+
+    /* THE THAW. Requirement 5: a fail-closed path that cannot recover is an
+     * outage, not a defence. The phase advances BEFORE publication resumes so
+     * that the blind window's last slice is closed while it is still blind. */
+    atomic_store_explicit(&g_st_phase, HARNESS_PH_THAWING,
+                          memory_order_release);
+    atomic_store_explicit(&g_st_thaw, 1, memory_order_release);
+    atomic_store_explicit(&g_st_closing, 1, memory_order_release);
+
+    deadline_ns = adce_now_ns() + HARNESS_STALE_WAIT_NS;
+    while (adce_now_ns() < deadline_ns) {
+        if (adce_epoch_read(&g_st_epoch, &pressure, &epoch_id,
+                            &observed_at_ns) &&
+            observed_at_ns != frozen_at_ns) {
+            recovered = 1;
+            break;
+        }
+        harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+    }
+    ADCE_TEST_ASSERT(recovered == 1);
+    ADCE_TEST_ASSERT(adce_epoch_is_stale(observed_at_ns, adce_now_ns()) == 0);
+
+    harness_phase_hold(HARNESS_PH_RECOVERED, HARNESS_RECOVER_NS);
+
+    atomic_store_explicit(&g_st_phase, HARNESS_PH_END, memory_order_release);
+    for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
+        ADCE_TEST_ASSERT(pthread_join(ingress[i], NULL) == 0);
+    }
+    atomic_store_explicit(&g_st_closer_run, 0, memory_order_release);
+    ADCE_TEST_ASSERT(pthread_join(closer, NULL) == 0);
+
+    /* The plane really ran: warmup completed, epochs were published, and the
+     * freeze did not simply stop a loop that had never done anything. */
+    ADCE_TEST_ASSERT(g_st_obs.epochs_closed >= ADCE_OBS_WARMUP_EPOCHS);
+    ADCE_TEST_ASSERT(g_st_obs.publications > 1);
+
+    for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
+        const harness_phased_t *ps = &g_st_sites[i];
+        uint64_t live_pm;
+        uint64_t blind_pm;
+        int phase;
+
+        live_pm = harness_permille(harness_delta_shed(ps, HARNESS_PH_LIVE),
+                                   harness_delta_arrivals(ps, HARNESS_PH_LIVE));
+        blind_pm =
+            harness_permille(harness_delta_shed(ps, HARNESS_PH_BLIND_B),
+                             harness_delta_arrivals(ps, HARNESS_PH_BLIND_B));
+
+        printf("  HARNESS stale[%d] shed permille: live=%llu blind=%llu/%llu/%llu"
+               " recovered=%llu | stale_reads live=%llu blind=%llu"
+               " recovered=%llu | admitted=%llu ceiling=%llu\n",
+               (int)i, (unsigned long long)live_pm,
+               (unsigned long long)harness_permille(
+                   harness_delta_shed(ps, HARNESS_PH_BLIND_A),
+                   harness_delta_arrivals(ps, HARNESS_PH_BLIND_A)),
+               (unsigned long long)blind_pm,
+               (unsigned long long)harness_permille(
+                   harness_delta_shed(ps, HARNESS_PH_BLIND_C),
+                   harness_delta_arrivals(ps, HARNESS_PH_BLIND_C)),
+               (unsigned long long)harness_permille(
+                   harness_delta_shed(ps, HARNESS_PH_RECOVERED),
+                   harness_delta_arrivals(ps, HARNESS_PH_RECOVERED)),
+               (unsigned long long)harness_delta_stale(ps, HARNESS_PH_LIVE),
+               (unsigned long long)harness_delta_stale(ps, HARNESS_PH_BLIND_B),
+               (unsigned long long)harness_delta_stale(ps,
+                                                       HARNESS_PH_RECOVERED),
+               (unsigned long long)harness_delta_admitted(ps,
+                                                          HARNESS_PH_PRIME,
+                                                          HARNESS_PH_END),
+               (unsigned long long)harness_ceiling(ps, HARNESS_PH_PRIME,
+                                                   HARNESS_PH_END));
+        /* The tap ordering still holds under this scenario. Free to check, and
+         * it rules out the deltas below being measured off a site that had
+         * stopped accounting for its arrivals. */
+        ADCE_TEST_ASSERT(site_identity_holds(&ps->site));
+
+        ADCE_TEST_ASSERT(harness_check_live_phase(ps, HARNESS_PH_LIVE,
+                                                  "live") == 0);
+
+        for (phase = HARNESS_PH_BLIND_A; phase <= HARNESS_PH_BLIND_C; ++phase) {
+            ADCE_TEST_ASSERT(harness_check_blind_phase(ps, phase,
+                                                       "blind") == 0);
+        }
+
+        ADCE_TEST_ASSERT(harness_check_live_phase(ps, HARNESS_PH_RECOVERED,
+                                                  "recovered") == 0);
+
+        /* Requirement 4 over the ENTIRE window including the transition: from
+         * the freeze, through the ageing window where reads flip from fresh to
+         * stale, to the moment publication resumed. The transition is where a
+         * ceiling that was only ever checked in steady state could hide a
+         * burst. */
+        ADCE_TEST_ASSERT(harness_delta_admitted(ps, HARNESS_PH_AGING,
+                                                HARNESS_PH_RECOVERED) <=
+                         harness_ceiling(ps, HARNESS_PH_AGING,
+                                         HARNESS_PH_RECOVERED));
+
+        /* And over the whole run, so no phase boundary can launder a burst. */
+        ADCE_TEST_ASSERT(harness_delta_admitted(ps, HARNESS_PH_PRIME,
+                                                HARNESS_PH_END) <=
+                         harness_ceiling(ps, HARNESS_PH_PRIME,
+                                         HARNESS_PH_END));
+
+        /* The two postures are distinguishable, not merely each inside a band
+         * that the other could also satisfy. */
+        ADCE_TEST_ASSERT(blind_pm >= live_pm + HARNESS_BAND_SEPARATION);
+
+    }
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -533,3 +1100,4 @@ ADCE_HARNESS_TEST_EXPORT(harness_tap_before_gate)
 ADCE_HARNESS_TEST_EXPORT(harness_tap_after_gate)
 ADCE_HARNESS_TEST_EXPORT(harness_observer_lifecycle)
 ADCE_HARNESS_TEST_EXPORT(harness_concurrent)
+ADCE_HARNESS_TEST_EXPORT(harness_stale_posture)
