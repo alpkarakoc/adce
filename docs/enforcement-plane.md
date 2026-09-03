@@ -456,10 +456,44 @@ function takes the draw as a parameter:
   with the branch predictors trained. A real ingress site interleaves request work and
   will sometimes take a cold line.
 
-  Still open on this bullet: the x86_64 comparison. This is the arm64 number, which §2
-  called the expensive case; whether TSO's plain `MOV` and no-op fence measurably beat
-  `LDAR` + `DMB ISHLD` is answered by the same case running on the x86_64 CI runner, and
-  is not yet recorded here.
+  *The x86_64 comparison, and §2's prediction confirmed.* Run 33772329101, both legs
+  native CI hardware, same clang 18.1.3, strict `-O2`:
+
+  | | x86_64 — TSO, plain `MOV`, no-op fence | arm64 — `LDAR` + `DMB ISHLD` | arm64 penalty |
+  |---|---|---|---|
+  | `admit` | 4.889 ns | 6.093 ns | +25% |
+  | `shed` | 3.860 ns | 5.226 ns | +35% |
+  | `limit` | 4.889 ns | 5.765 ns | +18% |
+  | `adce_now_ns` | 16.916 ns | 30.554 ns | +81% |
+  | empty-pair floor, p50 | 16 ns | 32 ns | |
+  | gate paired p50 | 19–21 ns | 32 ns | |
+
+  §2 called arm64 "the more expensive case and the one to measure" and it is: the barrier
+  costs between a fifth and a third of the gate's total, depending on outcome. The claim
+  was directional and it held.
+
+  Two things follow that the arm64 measurement alone could not establish. First, **the
+  do-not-cache decision holds on both architectures rather than only on the machine it was
+  first measured on.** The clock read dominates the entire gate by 3.5× on x86_64 and by
+  5.0–5.9× on arm64, so removing the seqlock read buys proportionally *less* on the
+  weakly-ordered target — the opposite of the intuition that a barrier is where caching
+  would pay. Second, **the two instruments cross-check where the clock is fine enough to
+  let them.** Linux's `CLOCK_MONOTONIC_RAW` resolves far better than Apple Silicon's ~41.7
+  ns tick, so on x86_64 the paired median sits 3–5 ns above the empty-pair floor — an
+  independent reproduction of the 3.86–4.89 ns batch figure by the instrument that does
+  not share its method. On arm64 the floor is 32 ns and the gate is still under it, which
+  is why the paired median there reports no shift.
+
+  Read these as single-run figures from shared CI runners, not as averages over runs. They
+  are stable to within a nanosecond across the runs observed so far, and nothing here
+  depends on more precision than that.
+
+  Still open: every latency figure above comes from a fixture with **no concurrent
+  publication**. The epoch is published once at setup and no observer thread runs, so
+  `adce_epoch_read` never retried and the seqlock's retry path has never been timed. That
+  is the one part of §2's cost argument still resting on the analytic estimate — "the odds
+  of landing inside a write on the order of the write's duration divided by 10 ms" — rather
+  than on a measurement.
 
   *A bound worth asserting, proposed and deliberately not folded in:* zero allocations and
   zero syscalls per arrival. That is structural rather than temporal, so it holds
