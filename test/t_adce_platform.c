@@ -315,6 +315,14 @@ int adce_t_enf_bucket_ceiling(void);
 int adce_t_enf_determinism(void);
 int adce_t_enf_shed_fraction(void);
 
+/* Integration harness cases, same convention, in test/t_adce_harness.c. These
+ * are the only cases that test a call ORDER rather than a function, so they are
+ * the only ones that link the observer thread in src/adce_obs_thread.c. */
+int adce_t_harness_tap_before_gate(void);
+int adce_t_harness_tap_after_gate(void);
+int adce_t_harness_observer_lifecycle(void);
+int adce_t_harness_concurrent(void);
+
 int main(void) {
     struct {
         const char *name;
@@ -345,6 +353,10 @@ int main(void) {
         {"enf_bucket_ceiling", adce_t_enf_bucket_ceiling},
         {"enf_determinism", adce_t_enf_determinism},
         {"enf_shed_fraction", adce_t_enf_shed_fraction},
+        {"harness_tap_before_gate", adce_t_harness_tap_before_gate},
+        {"harness_tap_after_gate", adce_t_harness_tap_after_gate},
+        {"harness_observer_lifecycle", adce_t_harness_observer_lifecycle},
+        {"harness_concurrent", adce_t_harness_concurrent},
     };
 
     int failures = 0;
