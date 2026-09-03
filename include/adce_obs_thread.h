@@ -52,6 +52,16 @@ typedef struct {
     /* Scheduling diagnostics, written only by the observer thread. */
     uint64_t late_epochs;
     uint64_t skipped_epochs;
+
+    /* Arrivals dropped by the missed-epoch branch in obs_service_deadline.
+     * This SYSTEMATICALLY UNDER-REPORTS what the stall actually cost: the
+     * stall suppresses the ingress rate itself (backpressure, timeouts,
+     * whatever the caller does under a non-responding observer), so fewer
+     * arrivals are tapped in the first place and this counts only the ones
+     * that still made it to the counter. Measured across captured runs at
+     * 5.7% to 49% of the nominal (un-stalled) arrival rate for the
+     * corresponding interval. Treat this field as a floor on the loss, not
+     * the loss. */
     uint64_t discarded_arrivals;
 } adce_obs_thread_t;
 

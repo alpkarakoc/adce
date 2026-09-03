@@ -509,14 +509,18 @@ static int test_harness_concurrent(void) {
     }
 
     /* Conservation across the observer boundary. The observer drained the
-     * counter once per epoch, so its final value is not the run's total and
-     * the exact identity is unavailable here -- which is precisely why
-     * section 5 scoped that identity to a run with no concurrent publication.
-     * What IS available is a bound: everything the observer discarded plus
-     * whatever it had not yet taken cannot exceed what the tap put in. A
-     * double tap, or a tap the site did not account for, breaks it. */
+     * counter once per epoch, so its final value alone is not the run's
+     * total -- which is why section 5 scoped the plain tapped == gated
+     * identity to a run with no concurrent publication. But every tap now
+     * lands exactly one of three places: folded into a closed epoch
+     * (obs.ctx.arrivals_closed, warmup included -- see adce_obs_epoch_close),
+     * dropped by a missed-epoch discard (obs.discarded_arrivals), or still
+     * sitting in the counter at run end (residual). Reading obs.ctx.* and
+     * obs.discarded_arrivals here is race-free: both are written only by the
+     * observer thread, and adce_obs_thread_stop() above already joined it. */
     residual = atomic_load_explicit(&g_h_counter.arrivals, memory_order_relaxed);
-    ADCE_TEST_ASSERT(residual + obs.discarded_arrivals <= total_tapped);
+    ADCE_TEST_ASSERT(total_tapped ==
+                     obs.ctx.arrivals_closed + obs.discarded_arrivals + residual);
 
     return 0;
 }
@@ -630,6 +634,14 @@ static _Atomic int g_st_closing;  /* the gate: 1 publishes, 0 freezes */
 static _Atomic int g_st_thaw;     /* set with g_st_closing on resume */
 static _Atomic int g_st_ready;
 
+/* The thaw-drain term of this test's own overrun identity. This is harness
+ * policy, not library policy -- adce_obs_ctx_t has no equivalent, because the
+ * shipped observer (src/adce_obs_thread.c) never drops a backlog without
+ * counting it as discarded_arrivals. Here the drain is a single line inside
+ * harness_closer_main, so a plain counter suffices: written only by the
+ * closer thread, read only after pthread_join(closer, ...) below. */
+static uint64_t g_st_thaw_discarded;
+
 static void harness_snap_take(harness_snap_t *snap, const harness_site_t *site) {
     snap->at_ns = adce_now_ns();
     snap->tapped = site->tapped;
@@ -677,7 +689,7 @@ static void *harness_closer_main(void *arg) {
                  * reason. */
                 if (atomic_exchange_explicit(&g_st_thaw, 0,
                                              memory_order_acq_rel)) {
-                    (void)adce_obs_counter_take(g_st_obs.counter);
+                    g_st_thaw_discarded += adce_obs_counter_take(g_st_obs.counter);
                 }
                 (void)adce_obs_epoch_close(&g_st_obs, now_ns);
             }
@@ -931,10 +943,13 @@ static int test_harness_stale_posture(void) {
     adce_q16_t pressure = 0;
     uint64_t epoch_id = 0;
     uint64_t observed_at_ns = 0;
+    uint64_t total_tapped = 0;
+    uint64_t residual;
 
     memset(&g_st_counter, 0, sizeof(g_st_counter));
     memset(&g_st_epoch, 0, sizeof(g_st_epoch));
     adce_obs_init(&g_st_obs, &g_st_counter, &g_st_epoch);
+    g_st_thaw_discarded = 0;
 
     for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
         memset(&g_st_sites[i], 0, sizeof(g_st_sites[i]));
@@ -1093,6 +1108,7 @@ static int test_harness_stale_posture(void) {
          * it rules out the deltas below being measured off a site that had
          * stopped accounting for its arrivals. */
         ADCE_TEST_ASSERT(site_identity_holds(&ps->site));
+        total_tapped += ps->site.tapped;
 
         ADCE_TEST_ASSERT(harness_check_live_phase(ps, HARNESS_PH_LIVE,
                                                   "live") == 0);
@@ -1126,6 +1142,18 @@ static int test_harness_stale_posture(void) {
         ADCE_TEST_ASSERT(blind_pm >= live_pm + HARNESS_BAND_SEPARATION);
 
     }
+
+    /* The same overrun identity as test_harness_concurrent, with this
+     * closer's own thaw drain folded into the discarded term -- the harness's
+     * missed-epoch policy here is the shipped one, applied by hand (see the
+     * comment on harness_closer_main), so the accounting has to match it
+     * exactly. Every read below is race-free: both ingress threads and the
+     * closer are already joined above, and g_st_obs.arrivals_closed /
+     * g_st_thaw_discarded are each written by exactly one of those now-joined
+     * threads. */
+    residual = atomic_load_explicit(&g_st_counter.arrivals, memory_order_relaxed);
+    ADCE_TEST_ASSERT(total_tapped ==
+                     g_st_obs.arrivals_closed + g_st_thaw_discarded + residual);
 
     return 0;
 }
