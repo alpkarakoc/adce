@@ -89,18 +89,34 @@ it.
   architecture rather than only compiled for it. LeakSanitizer executed for the first time
   in this project's history — `verify.sh` enables it only on Linux, and Darwin has no LSan
   back end — and reported nothing; neither did UBSan or TSan.
+- GCC's sanitizers now run too, and agree with Clang's. Run 33746269305: `gcc (GCC) 14.4.0`
+  ASan+UBSan on `verify-linux-gcc.sh`'s linux/amd64 leg, native x86_64, all 30 cases green
+  and not one diagnostic — no `runtime error`, no `SUMMARY:`, no leak report. That matters
+  for two specific places rather than in general: `adce_obs_clamp_record` cites UBSan by
+  name as the check that catches its `ADCE_Q16_MIN` negation guard, and the `__int128` Q16
+  lane rests on the same check. Both are now two-compiler evidence instead of one
+  compiler's opinion. The profile is conditional by construction — amd64 only, and only
+  where amd64 is native — and it prints a loud SKIP with its reason everywhere else, so
+  "GCC's sanitizers passed" and "GCC's sanitizers were not run here" can never be confused.
 - This does NOT retire the arm64 evidence, and reading it that way inverts the argument.
   x86_64 is TSO and is the weaker test; arm64's weak ordering is what can expose a missing
   barrier, which is why the local target is the host architecture. What changed is which
   leg is unattended: arm64 native TSan now runs only on a developer machine, because no CI
   job runs on arm64 hardware at all — the linux/arm64 leg is qemu under an x86_64 host.
-- Still unverified, in descending order of how much each would change a decision. GCC's
-  sanitizers run NOWHERE: the CI sanitizer job pins `CC=clang`, `verify-linux-gcc.sh`
-  deliberately carries none, and the two compilers do not report identical UBSan findings.
-  No CI job runs on arm64 hardware, so every arm64 sanitizer result in this project comes
-  from one laptop. Closed-loop behaviour — oscillation, settling, limit cycles — has no
-  load model and no evidence in either direction. Per-arrival latency is measured nowhere,
-  though `docs/enforcement-plane.md` §5 lists it as a harness deliverable.
+- Still unverified, in descending order of how much each would change a decision.
+  (1) No CI job runs on arm64 HARDWARE, so every arm64 sanitizer result in this project —
+  the evidence the bullet above calls authoritative — comes from one laptop. The
+  `verify-linux-gcc.sh` arm64 leg is qemu, which proves compilation, not memory ordering.
+  (2) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
+  every race result in this project is Clang's. (3) The Darwin half of
+  `adce_platform_get_entropy` — the `getentropy` chunking loop — has no automated coverage
+  at all: CI is Linux-only and takes the `getrandom` branch, so that code runs only on the
+  development machine. No CI job runs macOS, which is the platform the per-edit gate runs
+  on. (4) Closed-loop behaviour — oscillation, settling, limit cycles — has no load model
+  and no evidence in either direction. (5) Per-arrival latency is measured nowhere, though
+  `docs/enforcement-plane.md` §5 lists it as a harness deliverable. Separately, and by
+  design rather than by omission: the `abort()` in `adce_rng_seed` has never executed, and
+  cannot without fault injection.
 - `adce_q16_div` with a zero divisor saturates toward the numerator's sign: negative
   numerator yields `ADCE_Q16_MIN`, zero or positive yields `ADCE_Q16_MAX`. A collapsed
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
