@@ -18,6 +18,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Nightly, because repeated execution is what finds the bugs this project
+  # actually has. The phase race in the harness survived four green runs and
+  # surfaced only when a 2-core runner widened the window; TSan could not have
+  # caught it, since a phase-accounting race is not a data race. Sampling the
+  # scheduler repeatedly is the mechanism that works on that class.
+  #
+  # Off the hour on purpose: GitHub queues scheduled workflows hardest at :00,
+  # and a nightly that starts late is a nightly whose result arrives late.
+  schedule:
+    - cron: "17 4 * * *"
 
 # A superseded push should not keep burning a runner; the newest commit is the
 # only one whose result anyone acts on.
@@ -86,9 +96,20 @@ jobs:
       #
       # On the arm64 runner this is TSan on real weakly-ordered hardware other
       # than the developer's own machine, which is the reason the leg exists.
+      # ADCE_REPEAT re-runs each profile's BINARY, build untouched. 1 on push and
+      # pull_request so the gate stays as fast as it is today; 10 on the nightly,
+      # where a couple of extra minutes buys a real hunt.
+      #
+      # 10 is derived, not round. On 2-core CI the harness has executed roughly
+      # 15 times with one phase-race failure, so p is about 0.067 per execution.
+      # The repeat covers three profiles, so 10 repeats is 30 executions and
+      # about 87% detection in one night -- which compounds to over 99% across
+      # three nights, at half the runtime of 20. For a recurring job the
+      # cumulative figure is the one that matters, not the per-night one.
       - name: verify.sh (strict, asan+ubsan, tsan)
         env:
           CC: clang
+          ADCE_REPEAT: ${{ github.event_name == 'schedule' && '10' || '1' }}
         run: ./scripts/verify.sh
 
   shipping-target:
