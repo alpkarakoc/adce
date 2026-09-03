@@ -88,6 +88,17 @@ it.
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
   `ADCE_Q16_MAX` by this rule. This is a fail-closed contract; changing it is an API
   decision.
+- A FUTURE `observed_at_ns` reads as maximally stale, and the unsigned wrap in
+  `adce_epoch_is_stale` is what produces it. A reader that cannot order the publication it
+  read against the clock it read has no coherent view of time and must not act on that
+  publication, so the wrap is load-bearing rather than an oversight: replacing it with a
+  signed difference, a saturating guard, or an `observed_at_ns > now_ns` branch returning 0
+  turns the case fail-OPEN. A torn `adce_epoch_read` counts as stale for the same reason —
+  no snapshot means no advice. Both are reachable without any fault and both require a
+  concurrent publication, so nonzero `stale_reads` on a healthy system is expected. Full
+  statement in `adce_platform.h` above `adce_epoch_is_stale` and in
+  `docs/enforcement-plane.md` §4.1, with the measurements. This is a fail-closed contract;
+  changing it is an API decision.
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.
