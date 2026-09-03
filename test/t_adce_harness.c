@@ -612,7 +612,11 @@ typedef struct {
 typedef struct {
     harness_site_t site;
     harness_snap_t snap[HARNESS_PH_COUNT];
-    int observed_phase;
+
+    /* Atomic because the driving thread WAITS on it. A phase boundary that the
+     * driver only announces, without confirming it was recorded, is not a
+     * boundary -- see harness_phase_sync. */
+    _Atomic int observed_phase;
 } harness_phased_t;
 
 static adce_obs_counter_t g_st_counter;
@@ -688,9 +692,11 @@ static void *harness_closer_main(void *arg) {
 
 static void *harness_stale_ingress_main(void *arg) {
     harness_phased_t *ps = (harness_phased_t *)arg;
+    int mine = HARNESS_PH_PRIME;
 
     adce_enf_thread_init(&ps->site.enf, &g_st_epoch, adce_now_ns());
     harness_snap_take(&ps->snap[HARNESS_PH_PRIME], &ps->site);
+    atomic_store_explicit(&ps->observed_phase, mine, memory_order_release);
 
     for (;;) {
         int phase = atomic_load_explicit(&g_st_phase, memory_order_acquire);
@@ -700,12 +706,16 @@ static void *harness_stale_ingress_main(void *arg) {
          * two batches. A phase this thread stepped straight over then shows a
          * zero-length delta, and the assertions below reject a zero-arrival
          * phase rather than passing it vacuously. */
-        while (ps->observed_phase < phase) {
-            ps->observed_phase++;
-            harness_snap_take(&ps->snap[ps->observed_phase], &ps->site);
+        while (mine < phase) {
+            mine++;
+            harness_snap_take(&ps->snap[mine], &ps->site);
+            /* Published AFTER the snapshot, and with release, so a driver that
+             * observes this value knows the boundary is already recorded. */
+            atomic_store_explicit(&ps->observed_phase, mine,
+                                  memory_order_release);
         }
 
-        if (ps->observed_phase >= HARNESS_PH_END) {
+        if (mine >= HARNESS_PH_END) {
             break;
         }
 
@@ -718,10 +728,38 @@ static void *harness_stale_ingress_main(void *arg) {
     return NULL;
 }
 
-/* Advances the phase and holds it for dur_ns. Separate from the sampling
- * helper below because the ageing phase is measured but not asserted. */
-static void harness_phase_hold(int phase, uint64_t dur_ns) {
+/* Advances the phase and does not return until EVERY ingress thread has
+ * recorded the boundary.
+ *
+ * Announcing a phase is not the same as the phase having started, and the
+ * difference is not cosmetic. The threads observe g_st_phase between batches,
+ * so a thread can still be accumulating into the previous phase's delta for a
+ * batch plus a pace-sleep after the store. If the driver changes the system in
+ * that window -- freezing or resuming publication -- those arrivals land in the
+ * wrong phase and are measured against the wrong expectation. That is what made
+ * a blind slice report an arrival that had not read stale: publication had
+ * already resumed while a thread was still inside BLIND_C.
+ *
+ * Adding HARNESS_PH_THAWING narrowed that window but could not close it, because
+ * the store and the thaw are two separate operations with no ordering between
+ * the threads and the driver. Waiting for the acknowledgement closes it. */
+static void harness_phase_sync(int phase) {
+    size_t k;
+
     atomic_store_explicit(&g_st_phase, phase, memory_order_release);
+
+    for (k = 0; k < HARNESS_STALE_THREADS; ++k) {
+        while (atomic_load_explicit(&g_st_sites[k].observed_phase,
+                                    memory_order_acquire) < phase) {
+            harness_sleep_ns(HARNESS_CLOSER_TICK_NS);
+        }
+    }
+}
+
+/* Separate from the sampling helper below because the ageing phase is measured
+ * but not asserted. */
+static void harness_phase_hold(int phase, uint64_t dur_ns) {
+    harness_phase_sync(phase);
     harness_sleep_ns(dur_ns);
 }
 
@@ -734,7 +772,7 @@ static int harness_phase_watch_stale(int phase, uint64_t dur_ns,
                                      uint64_t frozen_at_ns) {
     uint64_t end_ns;
 
-    atomic_store_explicit(&g_st_phase, phase, memory_order_release);
+    harness_phase_sync(phase);
     end_ns = adce_now_ns() + dur_ns;
 
     while (adce_now_ns() < end_ns) {
@@ -949,6 +987,11 @@ static int test_harness_stale_posture(void) {
     ADCE_TEST_ASSERT(adce_epoch_is_stale(observed_at_ns, adce_now_ns()) == 0);
     frozen_at_ns = observed_at_ns;
 
+    /* Close the LIVE window on every ingress thread BEFORE publication stops,
+     * so no thread is still accumulating into the live delta when the epoch
+     * starts ageing. */
+    harness_phase_sync(HARNESS_PH_AGING);
+
     /* THE FREEZE. The closer keeps running and keeps its writer claim; it
      * simply stops calling adce_obs_epoch_close, so nothing is published and
      * observed_at_ns stops advancing. */
@@ -957,7 +1000,7 @@ static int test_harness_stale_posture(void) {
     /* Ageing: past the last publication but not yet past the advice timeout.
      * Reads cross from fresh to stale somewhere inside this window, so it is
      * asserted for the ceiling only. */
-    harness_phase_hold(HARNESS_PH_AGING, HARNESS_AGING_NS);
+    harness_sleep_ns(HARNESS_AGING_NS);
 
     /* Requirement 1: stale becomes true and STAYS true, and the published
      * timestamp does not move, for the whole blind window. */
@@ -980,8 +1023,7 @@ static int test_harness_stale_posture(void) {
     /* THE THAW. Requirement 5: a fail-closed path that cannot recover is an
      * outage, not a defence. The phase advances BEFORE publication resumes so
      * that the blind window's last slice is closed while it is still blind. */
-    atomic_store_explicit(&g_st_phase, HARNESS_PH_THAWING,
-                          memory_order_release);
+    harness_phase_sync(HARNESS_PH_THAWING);
     atomic_store_explicit(&g_st_thaw, 1, memory_order_release);
     atomic_store_explicit(&g_st_closing, 1, memory_order_release);
 
