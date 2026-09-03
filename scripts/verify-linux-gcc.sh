@@ -7,16 +7,33 @@
 # arm64/Clang only. This script is the slower, release-facing check and is
 # deliberately NOT wired into verify.sh.
 #
-# Two profiles, both build-and-run:
+# Two platforms, both build-and-run:
 #   linux/arm64  native on an Apple-silicon host; catches GCC-specific
 #                diagnostics cheaply, before paying for emulation.
-#   linux/amd64  emulated, and the actual shipping target. This is the only
-#                place ADCE_CACHELINE == 64, __builtin_ia32_pause, and the
-#                64-byte _Static_asserts are ever compiled.
+#   linux/amd64  the actual shipping target. Emulated on an arm64 development
+#                host, NATIVE in CI. This is the only place ADCE_CACHELINE == 64,
+#                __builtin_ia32_pause, and the 64-byte _Static_asserts are ever
+#                compiled.
 #
-# No sanitizers here on purpose: ASan/TSan under qemu emulation report races and
-# faults that do not exist on real hardware. They stay in verify.sh, where they
-# run natively and their output can be trusted.
+# Plus one sanitizer profile: GCC ASan+UBSan, on the linux/amd64 leg, and only
+# when this host runs amd64 NATIVELY.
+#
+# This gate previously excluded sanitizers outright, on the grounds that ASan and
+# TSan under qemu report faults that do not exist on real hardware. That
+# reasoning has not been abandoned -- it is still true for every emulated leg,
+# and it is exactly why the run below is conditional rather than unconditional.
+# What changed is that it stopped being true for amd64 in CI, which is real
+# x86_64 hardware.
+#
+# Why it is worth running at all: Clang's sanitizers in verify.sh were the only
+# ones this project had ever executed, and GCC and Clang do not report identical
+# UBSan findings. adce_obs_clamp_record cites UBSan as the check that catches its
+# ADCE_Q16_MIN negation guard, and the whole __int128 Q16 lane rests on the same
+# check. One compiler's silence on that is one compiler's opinion.
+#
+# The emulated case SKIPS and says so, with its reason. A profile that skips
+# silently is worse than a profile that does not exist, because everyone believes
+# it ran.
 set -euo pipefail
 
 cd "${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -40,6 +57,39 @@ STRICT_FLAGS="$STRICT_FLAGS -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wv
 # reference. Confirmed on both platforms below under glibc 2.41. This gate is
 # the only place that failure is observable.
 LDLIBS="-lpthread -lm"
+
+# Mirrors profile 2 of verify.sh exactly, including the absence of the strict
+# warning set: that profile is about runtime behaviour, and the compile-time
+# diagnostics are already covered by STRICT_FLAGS above.
+#
+# -fno-sanitize-recover=all makes the first UBSan finding fatal rather than a
+# logged line the run walks past, which is the only way a sanitizer profile can
+# fail a gate.
+#
+# TSan is deliberately NOT here. The hole this profile closes is UBSan coverage
+# of the two guards named in the header; TSan is not part of it. CLAUDE.md makes
+# arm64 the authoritative concurrency evidence precisely because its weak
+# ordering is the stricter test, so a GCC TSan run on x86_64 TSO would be the
+# weaker check under a second compiler -- new cost, little new information.
+# Adding it is a separate decision with its own reason.
+SAN_FLAGS="-std=c11 -O1 -g -fsanitize=address,undefined"
+SAN_FLAGS="$SAN_FLAGS -fno-omit-frame-pointer -fno-sanitize-recover=all"
+
+# Which legs this host can run without emulation. macOS reports arm64 and Linux
+# reports aarch64 for the same hardware, so both spellings map to the same leg.
+# Anything unrecognised falls through to "emulated", which skips: a profile whose
+# output cannot be trusted must not run, and guessing in the permissive direction
+# would produce exactly the false reports this gate used to avoid by excluding
+# sanitizers altogether.
+HOST_ARCH="$(uname -m)"
+
+platform_is_native() {
+    case "$1:$HOST_ARCH" in
+        linux/amd64:x86_64|linux/amd64:amd64) return 0 ;;
+        linux/arm64:arm64|linux/arm64:aarch64) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # --- source discovery -------------------------------------------------------
 # Each platform builds ONE binary from all of src/*.c plus all of test/t_*.c.
@@ -139,6 +189,35 @@ for platform in linux/arm64 linux/amd64; do
     else
         echo "== $platform: FAIL ==" >&2
         failed="$failed $platform"
+    fi
+
+    # The sanitizer profile. amd64 only, native only, and never silent about
+    # which of those two it did.
+    if [ "$platform" = "linux/amd64" ]; then
+        sanlog="$OUT/log-amd64-san"
+        if platform_is_native "$platform"; then
+            echo "== $platform gcc asan+ubsan (native $HOST_ARCH) =="
+            if docker run --rm --platform "$platform" -v "$PWD":/src:ro -w /src "$IMAGE" \
+                 sh -c "gcc $SAN_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc_san $LDLIBS && \
+                        ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+                        /tmp/t_gcc_san" 2>&1 | tee "$sanlog" \
+               && assert_all_tests_ran "$sanlog" "$platform gcc-san"; then
+                echo "== $platform gcc asan+ubsan: PASS =="
+            else
+                echo "== $platform gcc asan+ubsan: FAIL ==" >&2
+                failed="$failed $platform/asan+ubsan"
+            fi
+        else
+            # Loud, and on stdout with the rest of the report rather than buried
+            # in stderr: this is the difference between "GCC's sanitizers passed"
+            # and "GCC's sanitizers were not run here", and those are not the
+            # same claim.
+            echo "== $platform gcc asan+ubsan: SKIPPED =="
+            echo "   this host is $HOST_ARCH, so linux/amd64 runs under qemu, and"
+            echo "   ASan/UBSan under emulation report faults that do not exist on"
+            echo "   real hardware. The profile runs where amd64 is native -- CI."
+            echo "   GCC's sanitizers were NOT run by this invocation."
+        fi
     fi
     echo
 done
