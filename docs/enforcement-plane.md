@@ -359,8 +359,9 @@ window*, never by arrivals. It does not grow with offered load. That is what dis
 them from the posture genuinely engaging, and it is the bound the harness asserts rather
 than asserting zero.
 
-**Measured**, over the harness's live phase — publication healthy throughout, four ingress
-threads:
+**Measured** under the **strict `-O2`** profile, over the harness's live phase — publication
+healthy throughout, four ingress threads. The profile is named because it turns out to
+dominate the counts; see 4.2.
 
 | | |
 | --- | --- |
@@ -376,6 +377,38 @@ publication never came close to lapsing. **A nonzero `stale_reads` on a healthy 
 therefore expected**, at roughly one per 300,000 arrivals here, and it is not evidence of an
 observer problem. What would be evidence is a count that scales with offered load rather
 than with publication count.
+
+### 4.2 The sanitizer profile, not the code, sets the stale-read rate
+
+The 4.1 table is strict `-O2`. Under TSan the same binary produces roughly **ten times** as
+many live-phase stale reads, and this is measured rather than assumed. Both legs ran the
+runner trimmed to `harness_stale_posture` alone, on the development machine (Apple M3, 8
+logical cores), with no other significant load:
+
+| profile | executions | live stale reads per thread | per run | max seen |
+| --- | --- | --- | --- | --- |
+| strict `-O2` | 100 | mean 0.34, p99 2 | ~1.4 | 3 |
+| TSan `-O1 -g` | 400 | mean 3.57, p99 8 | ~14 | 10 |
+
+Both routes into a live-phase stale read require a concurrent publication (4.1), so anything
+that widens the window between the caller's `adce_now_ns()` and the gate's epoch read raises
+the count. TSan instruments every memory access and does exactly that. **So the sanitizer
+moves this rate UP by an order of magnitude, and any claim about a stale-read rate that does
+not name its profile is unfalsifiable.**
+
+The practical consequence is for the bound the harness asserts. `harness_check_live_phase`
+requires `delta_stale <= publications_bound`, which is the phase's wall duration over `T`
+plus one — about 31 for a 300 ms live phase. Against the TSan distribution above, whose
+worst observation in 1600 thread-samples was 10, that assertion has 3.1x headroom; against
+strict, 10.3x. Fitting the TSan counts to a Poisson with the observed mean puts
+`P(X >= 32)` near **6e-20** per thread-sample. That assertion is therefore not a probe for
+anything: it is a guard against a qualitative change in the mechanism, not a sampler of the
+tail, and no realistic number of repetitions will make it fire while the mechanism holds.
+
+**500 executions of `harness_stale_posture` on the current tree — 400 TSan, 100 strict —
+produced zero failures.** The 300 executions in the `CLAUDE.md` fault-injection campaign are
+deliberately excluded from that count: those ran a build with 199c476 reverted to reinstate
+the phase race, so they measure a different program and cannot be pooled with these.
 
 ## 5. Testable now vs. needs a harness
 

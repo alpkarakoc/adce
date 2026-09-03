@@ -254,6 +254,53 @@ it.
   it. Reproducing the race at a measurable rate anywhere at all is the missing precondition
   for any repeat count in this project having a basis, and no configuration reached for so
   far provides it.
+- Classifying a live-phase stale read needs FOUR fields, not three, and the obvious triple
+  misclassifies silently. A proposal to capture `(now_ns, observed_at_ns, publication_count)`
+  into a per-thread ring buffer cannot separate the three routes of
+  `docs/enforcement-plane.md` 4.1, and the failure is not a gap but a wrong answer.
+  `adce_epoch_read` returns 0 BEFORE it writes through any of its out-parameters, so on a
+  torn read `adce_enf_decide`'s local `observed_at_ns` keeps its initialiser of 0. The
+  classifier then evaluates `now_ns - 0`, which is a full monotonic clock reading, exceeds
+  `ADCE_ADVICE_TIMEOUT_NS` by many orders of magnitude, and reads as **aged** -- the one
+  route the measurements say never happens. A torn read would be recorded as the thing it
+  is not, and `observed_at_ns == 0` cannot rescue it either, because a cold-start epoch is
+  genuinely zero with a VALID snapshot.
+
+  Adding `have_snapshot` -- the return value already computed on that path -- makes all three
+  exactly separable, with no ambiguity and nothing the gate cannot see:
+  `have_snapshot == 0` is torn; otherwise `observed_at_ns > now_ns` is future (the unsigned
+  wrap, which is why the comparison must be made before the subtraction); otherwise
+  `now_ns - observed_at_ns > ADCE_ADVICE_TIMEOUT_NS` is aged. `publication_count` is not
+  needed for the classification at all -- it is the denominator of the bound assertion, a
+  separate purpose that the proposal folded into the same tuple.
+- The instrumentation was never shown to suppress anything, and the ~0.65% rate it was
+  chasing has no basis. Recorded because the comparison was run specifically to avoid
+  building on the number, and because this is the third time in this project a single
+  observation has been quoted as a rate.
+
+  The claim under test was one failure at iteration 154 of a planned 500 -- 1/154, 0.65% --
+  against an instrumented build that went 0/400. Running the UNINSTRUMENTED TSan binary the
+  same 400 times on the same machine, runner trimmed to `harness_stale_posture`, gave
+  **0 failures**. Both arms are empty, so nothing here distinguishes "the instrumentation
+  suppressed the event" from "there was no event at that rate to suppress", and the
+  suppression hypothesis is unsupported rather than refuted. It never had much support: 0/400
+  under a true rate of 0.65% happens 7.4% of the time, which is not significant at any
+  conventional threshold, and the 95% interval on a SINGLE observed failure in 154 runs is
+  0.016% to 3.57% -- a factor of 217, the same error shape as the 0.067 above.
+
+  What the run does settle is stronger than the comparison it was asked for, and it came from
+  parsing output the harness ALREADY prints rather than from adding instrumentation. Across
+  1600 thread-samples the live-phase stale count never exceeded 10 against an assertion bound
+  of ~31, giving `P(X >= 32)` near 6e-20 per thread-sample under a Poisson fit. A 0.65%
+  per-run failure would need that tail to be about 2.8e16 times heavier. **So the live-phase
+  bound assertion was never a plausible source of the observed failure**, and whatever failed
+  at iteration 154 -- a TSan data-race report, a different assertion, or a different tree --
+  was not this. Chasing it with a ring buffer behind that assertion would have instrumented
+  the wrong thing, however cheap the capture.
+
+  The profile, meanwhile, moves this rate by 10x on its own: strict `-O2` averages 0.34 live
+  stale reads per thread, TSan 3.57, measured in `docs/enforcement-plane.md` 4.2. A printf is
+  not the largest perturbation in this experiment and never was.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
