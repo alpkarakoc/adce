@@ -472,6 +472,45 @@ the bound above, which is a statement about what the derivation covers and stand
 it means this configuration does not reach the regime, and the budget was not extended to
 chase it.
 
+**The bound has since been re-derived along the scaling boundary**, which is what the
+diagnosis called for. `harness_check_live_phase` now asserts two separate things, and because
+the function is shared, both apply to the LIVE and RECOVERED phases alike:
+
+| quantity | bound | why |
+| --- | --- | --- |
+| `torn + future` | `<= publications_bound` | both require a concurrent publication; a thread straddles at most one at a time |
+| `aged` | `== 0` | requires only a frozen epoch, so it is arrival-scaled and a publication-derived bound does not constrain it |
+
+The two phases get the same shape deliberately rather than incidentally. The scaling argument
+does not mention the phase: it turns on whether a route needs a concurrent publication, and
+publication is healthy in both by construction — RECOVERED does not begin until the driver has
+confirmed a fresh epoch. A different shape for the two would need a reason, and there is none.
+
+`aged == 0` is a point value rather than a band because in a phase where publication is
+healthy there is no benign route to it: an aged read means the closer went longer than
+`ADCE_ADVICE_TIMEOUT_NS` without publishing, 50 ms against a 10 ms cadence. `verify.sh`'s own
+comment declines to pin its profile to one core precisely because a starved closer yields
+"failures that reflect the harness's own host assumptions rather than a defect", and
+unattributable reds are worse than a weaker hunt. **The route split is what changes that
+calculus** — a red now prints `aged=N` beside `torn` and `future`, so the cause is named in
+the output rather than inferred from a bare stale count.
+
+The blind phases assert the mirror image: `aged == stale`, with `torn` and `future` both zero.
+Publication is stopped there, so there are no seqlock writes to tear against and nothing can
+land ahead of a caller's `now_ns`. That assertion is what stops `aged == 0` from being
+vacuous — it drives the same counter to the full arrival count, tens of thousands per slice,
+so the live-phase zero is a statement about the system rather than about a counter that never
+increments.
+
+**Both assertions were shown to have teeth.** Holding the closer for twice the timeout inside
+a live phase, in a scratch copy with no library source touched, fires the aged assertion with
+its split printed: `aged=40704 torn=0 future=0 arrivals=243456`. That case would also have
+breached the old summed bound, so `harness_stale_split_teeth` proves the part that would not:
+driven through `harness_check_live_phase` on synthetic snapshots, `aged=5` with `stale=5`
+against a bound of 31 **passes the old predicate and fails the split**. The region
+`0 < aged <= publications_bound` is the detection gap the split closes, and it is the reason to
+split rather than merely to classify.
+
 **This is a diagnosis of the bound, not yet a reproduction.** The route split now printed by
 the harness is what would settle it: torn and future belong under the publications bound,
 whereas any nonzero **aged** term in the recovered phase means the bound is being applied to a

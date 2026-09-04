@@ -326,6 +326,7 @@ int adce_t_harness_tap_after_gate(void);
 int adce_t_harness_observer_lifecycle(void);
 int adce_t_harness_concurrent(void);
 int adce_t_harness_stale_posture(void);
+int adce_t_harness_stale_split_teeth(void);
 
 /* Per-arrival latency, in test/t_adce_latency.c. Same convention. It REPORTS
  * numbers and asserts only that each fixture drove the outcome it claims, so it
@@ -371,6 +372,7 @@ int main(void) {
         {"harness_observer_lifecycle", adce_t_harness_observer_lifecycle},
         {"harness_concurrent", adce_t_harness_concurrent},
         {"harness_stale_posture", adce_t_harness_stale_posture},
+        {"harness_stale_split_teeth", adce_t_harness_stale_split_teeth},
         {"latency_per_arrival", adce_t_latency_per_arrival},
     };
 
