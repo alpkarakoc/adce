@@ -95,6 +95,20 @@ typedef struct {
     uint64_t dropped_shed;
     uint64_t dropped_limit;
     uint64_t stale_reads;
+
+    /* The stale total, split by which of the three routes of
+     * docs/enforcement-plane.md section 4.1 was taken. Their sum is
+     * stale_reads exactly -- adce_enf_decide derives all four from one
+     * classification, so the split cannot drift from the total.
+     *
+     * These exist because the routes are not interchangeable when reading a
+     * count back: torn and future are bounded by PUBLICATIONS in the window,
+     * while aged is bounded only by ARRIVALS. A bare stale_reads cannot tell a
+     * healthy seqlock straddle from an observer that stopped, which is the
+     * distinction every bound in the harness rests on. */
+    uint64_t torn_reads;
+    uint64_t future_reads;
+    uint64_t aged_reads;
 } adce_enf_ctx_t;
 
 /* ===========================================================================
@@ -130,6 +144,56 @@ static inline int adce_enf_should_shed(adce_q16_t pressure_q16, uint64_t draw) {
 }
 
 /* ===========================================================================
+ * The stale verdict, and which route reached it.
+ * ===========================================================================
+ */
+
+/* The three routes of docs/enforcement-plane.md section 4.1, plus the verdict
+ * that no route was taken. */
+typedef enum {
+    ADCE_ENF_FRESH = 0,
+    ADCE_ENF_STALE_TORN,
+    ADCE_ENF_STALE_FUTURE,
+    ADCE_ENF_STALE_AGED
+} adce_enf_stale_route_t;
+
+/* Classifies one epoch read. Pure in its three arguments, so every route is
+ * reachable from a unit test without a running observer -- which matters here
+ * because a TORN read cannot be produced in-process at all:
+ * adce_seqlock_read_begin spins while the sequence is odd, so no
+ * single-threaded fixture can hold a writer window open.
+ *
+ * have_snapshot is NOT redundant with the timestamps, and leaving it out is a
+ * silent misclassification rather than a missing case. adce_epoch_read returns
+ * 0 BEFORE writing through any out-parameter, so on a torn read the caller's
+ * observed_at_ns still holds whatever it was initialised to -- 0 in
+ * adce_enf_decide. Classifying on the timestamps alone then computes
+ * now_ns - 0, a full CLOCK_MONOTONIC_RAW reading, which exceeds
+ * ADCE_ADVICE_TIMEOUT_NS by many orders of magnitude and reads as AGED: the
+ * one route the measurements say never occurs on a healthy system. The
+ * instrument would manufacture a phantom of exactly the thing it was built to
+ * hunt. Nor does `observed_at_ns == 0` rescue it, because a cold-start epoch
+ * is genuinely zero with a VALID snapshot, and those two must not merge.
+ *
+ * Order is load-bearing. Torn is tested first because its timestamp is
+ * meaningless. Future is tested BEFORE the subtraction, because that
+ * subtraction is the deliberate unsigned wrap documented at
+ * adce_epoch_is_stale; comparing after it would have already lost the sign. */
+static inline adce_enf_stale_route_t adce_enf_classify_stale(
+    int have_snapshot, uint64_t observed_at_ns, uint64_t now_ns) {
+    if (!have_snapshot) {
+        return ADCE_ENF_STALE_TORN;
+    }
+    if (observed_at_ns > now_ns) {
+        return ADCE_ENF_STALE_FUTURE;
+    }
+    if ((now_ns - observed_at_ns) > ADCE_ADVICE_TIMEOUT_NS) {
+        return ADCE_ENF_STALE_AGED;
+    }
+    return ADCE_ENF_FRESH;
+}
+
+/* ===========================================================================
  * The gate.
  * ===========================================================================
  */
@@ -145,6 +209,7 @@ static inline adce_enf_outcome_t adce_enf_decide(adce_enf_ctx_t *ctx,
     uint64_t observed_at_ns = 0;
     uint64_t elapsed_ns;
     int have_snapshot;
+    adce_enf_stale_route_t route;
 
     have_snapshot =
         adce_epoch_read(ctx->epoch, &pressure, &epoch_id, &observed_at_ns);
@@ -158,9 +223,26 @@ static inline adce_enf_outcome_t adce_enf_decide(adce_enf_ctx_t *ctx,
      * A torn read is treated as a stale one. Retrying on the arrival path is
      * unbounded work for a value that is about to be replaced anyway, and no
      * snapshot means no advice, which is the conservative reading. */
-    if (!have_snapshot || adce_epoch_is_stale(observed_at_ns, now_ns)) {
+    /* ONE predicate, not two that have to agree. The condition here was
+     * `!have_snapshot || adce_epoch_is_stale(...)`, and classifying alongside
+     * it would have left two expressions to keep in step; deriving both the
+     * verdict and its route from the single classification makes
+     * torn + future + aged == stale_reads an identity rather than a
+     * convention. The verdict is unchanged, and enf_stale_route_equivalence
+     * asserts that against the original expression over the boundary and wrap
+     * cases. */
+    route = adce_enf_classify_stale(have_snapshot, observed_at_ns, now_ns);
+
+    if (route != ADCE_ENF_FRESH) {
         pressure = ADCE_ENF_STALE_PRESSURE;
         ctx->stale_reads++;
+        if (route == ADCE_ENF_STALE_TORN) {
+            ctx->torn_reads++;
+        } else if (route == ADCE_ENF_STALE_FUTURE) {
+            ctx->future_reads++;
+        } else {
+            ctx->aged_reads++;
+        }
     } else {
         /* Re-clamped at read, not merely at publish. The value crossed a
          * seqlock and a plane boundary to get here, and a reader that trusts
