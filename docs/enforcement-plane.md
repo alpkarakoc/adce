@@ -359,6 +359,33 @@ window*, never by arrivals. It does not grow with offered load. That is what dis
 them from the posture genuinely engaging, and it is the bound the harness asserts rather
 than asserting zero.
 
+**Route 1 is bounded differently, and that asymmetry is the whole reason to separate them.**
+Aged reads need no concurrent publication at all — they are what an epoch that has stopped
+advancing produces — so their count scales with *arrivals*, not publications. A bound derived
+from publications does not constrain them. Reading a bare `stale_reads` back cannot tell the
+two regimes apart; the split can.
+
+**Classifying a read needs four fields, not three.** `have_snapshot` — the value
+`adce_epoch_read` already returned — is load-bearing, and omitting it does not merely lose
+the torn case, it *misreports* it. `adce_epoch_read` returns 0 **before** writing through any
+out-parameter, so on a torn read the caller's `observed_at_ns` still holds its initialiser of
+`0`; classifying on timestamps alone then evaluates `now_ns - 0`, a full
+`CLOCK_MONOTONIC_RAW` reading, which exceeds the timeout by many orders of magnitude and
+reads as **aged** — the one route that never occurs on a healthy system. Testing
+`observed_at_ns == 0` instead does not help either: a cold-start epoch is genuinely zero
+*with a valid snapshot*. The rule, in `adce_enf_classify_stale`:
+
+| test, in this order | route |
+| --- | --- |
+| `have_snapshot == 0` | torn |
+| `observed_at_ns > now_ns` | future |
+| `now_ns - observed_at_ns > ADCE_ADVICE_TIMEOUT_NS` | aged |
+| otherwise | fresh |
+
+Order matters: torn first because its timestamp is meaningless, and future *before* the
+subtraction, since that subtraction is the deliberate unsigned wrap. `publication_count` is
+not part of this at all — it is the denominator of the bound assertion, a separate purpose.
+
 **Measured** under the **strict `-O2`** profile, over the harness's live phase — publication
 healthy throughout, four ingress threads. The profile is named because it turns out to
 dominate the counts; see 4.2.
@@ -409,6 +436,40 @@ tail, and no realistic number of repetitions will make it fire while the mechani
 produced zero failures.** The 300 executions in the `CLAUDE.md` fault-injection campaign are
 deliberately excluded from that count: those ran a build with 199c476 reverted to reinstate
 the phase race, so they measure a different program and cannot be pooled with these.
+
+### 4.3 The publications bound is reused at RECOVERED, where its derivation does not reach
+
+`test_harness_stale_posture` checks the recovered phase by calling
+`harness_check_live_phase(ps, HARNESS_PH_RECOVERED, "recovered")` — the *same function*, so
+the same `delta_stale <= publications_bound` bound, about 31 for a 300 ms phase. There is no
+separate argument for the recovered phase; the bound's justification is written entirely
+about a *live* phase with publication healthy and cadence at least `T`, and it is reused
+across a thaw without re-derivation.
+
+Two mechanisms can be ruled out from the code, and are, so that neither is chased again:
+
+- **Back-to-back publications from a catch-up close do not happen here.** The closer advances
+  `deadline_ns = now_ns + T` on every fire *including while publication is frozen*, its close
+  is a single `if` rather than a catch-up loop, and `adce_obs_epoch_close` publishes at most
+  once per call. Cadence is at least `T` across the thaw.
+- **A publication cannot silently fail after warmup.** The sigma floor *clamps* sigma; it
+  never skips the publish.
+
+What the derivation genuinely does not cover is route 1. The bound counts *straddles*, and at
+a thaw a stale read need not be a straddle — the epoch is frozen and genuinely **aged**, and
+aged reads scale with arrivals. `HARNESS_STALE_BATCH` is 256, so a single batch landing in a
+still-aged window contributes ~256 to a quantity bounded at ~31. A reported failure of
+`recovered=261` on one site against `recovered=1` on another is that shape: an arrival-scaled
+count measured against a publication-scaled bound, and a per-thread rather than global
+mechanism.
+
+**This is a diagnosis of the bound, not yet a reproduction.** The route split now printed by
+the harness is what would settle it: torn and future belong under the publications bound,
+whereas any nonzero **aged** term in the recovered phase means the bound is being applied to a
+regime its derivation never covered. Under a healthy run every live and recovered stale read
+classifies as torn, with the occasional future and **zero aged** — which is what 4.1 already
+claimed and is now measured through the shipped path rather than through temporary
+instrumentation.
 
 ## 5. Testable now vs. needs a harness
 
