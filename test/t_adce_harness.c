@@ -876,35 +876,66 @@ static int harness_check_live_phase(const harness_phased_t *ps, int phase,
      * vacuously, so an empty phase is a failure rather than a pass. */
     ADCE_TEST_ASSERT(arrivals > 0);
 
-    /* Requirement 2, the "was zero before it" half -- but bounded by
-     * publications rather than asserted at exactly zero, and the difference is
-     * a measurement, not a convenience.
+    /* Requirement 2, the "was zero before it" half, split along the boundary
+     * that actually governs it. The three routes of
+     * docs/enforcement-plane.md 4.1 do NOT share a denominator, and summing
+     * them under one publication-derived bound was a derivation error rather
+     * than a conservative simplification:
      *
-     * Instrumenting adce_enf_decide to classify every live-phase stale read
-     * showed the aged count is zero: across runs, not one of them came from an
-     * epoch that had actually crossed ADCE_ADVICE_TIMEOUT_NS, and the maximum
-     * age observed on the stale branch was 0. Close-to-close cadence peaked at
-     * 11.2 ms against a 50 ms timeout, so publication never lapsed. The handful
-     * that do occur have exactly two causes, both of them this design working:
+     *   - TORN (adce_epoch_read landed inside the writer's sequence window)
+     *     and FUTURE (a publication landed between the caller's adce_now_ns()
+     *     and the gate's epoch read) both require a CONCURRENT PUBLICATION. A
+     *     sequential thread can straddle at most one at a time, so together
+     *     they are bounded by publications in the window and do not grow with
+     *     offered load. Asserting zero here would be asserting that the
+     *     seqlock never tears and that no publish ever lands in a read window,
+     *     neither of which this design claims.
      *
-     *   - a TORN read. adce_epoch_read returned 0 because the reader landed
-     *     inside the writer's sequence window, and adce_enf_decide treats that
-     *     as stale on purpose -- "no snapshot means no advice, which is the
-     *     conservative reading".
-     *   - a publication landing between the caller's adce_now_ns() and the
-     *     epoch read inside the gate, which makes observed_at_ns exceed the
-     *     now_ns already captured. adce_epoch_is_stale subtracts those as
-     *     uint64_t, so it underflows to an enormous age and reads stale.
+     *   - AGED requires no publication at all -- only an epoch that has
+     *     stopped advancing -- so it is bounded by ARRIVALS, and a
+     *     publication-derived bound does not constrain it. One
+     *     HARNESS_STALE_BATCH of 256 arrivals landing in an aged window
+     *     contributes 256 against a bound of ~31.
      *
-     * Both are fail-closed and both require a CONCURRENT PUBLICATION, and a
-     * sequential thread can straddle at most one publication at a time. So the
-     * count is bounded by publications in the window, never by arrivals -- it
-     * does not grow with offered load, which is what distinguishes it from the
-     * posture actually engaging. Asserting == 0 would be asserting that the
-     * seqlock never tears and that no publish ever lands in the read window,
-     * neither of which this design claims. */
-    ADCE_TEST_ASSERT(harness_delta_stale(ps, phase) <=
+     * Which is why the bound below covers only the first pair. */
+    ADCE_TEST_ASSERT(harness_delta_torn(ps, phase) +
+                     harness_delta_future(ps, phase) <=
                      harness_publications_bound(ps, phase));
+
+    /* And AGED is zero, as a point value rather than a band, because in a
+     * phase where publication is healthy there is no benign route to it. An
+     * aged read here means the closer went more than ADCE_ADVICE_TIMEOUT_NS
+     * without publishing -- 50 ms against a 10 ms cadence -- which is a fact
+     * about this run that the test must report rather than absorb into a
+     * tolerance.
+     *
+     * This is the assertion verify.sh's own comment warns about when it
+     * declines to pin the profile to one core: a starved closer produces a
+     * failure that reflects the host rather than a defect, and unattributable
+     * reds are worse than a weaker hunt. The route split is what changes that
+     * calculus -- a red here prints aged=N beside torn and future, so the
+     * cause is named in the output instead of being inferred from a bare
+     * stale count. It is attributable now, which is the whole reason it can
+     * be asserted at zero. */
+    if (harness_delta_aged(ps, phase) != 0) {
+        fprintf(stderr,
+                "FAIL: %s aged=%llu (expected 0) torn=%llu future=%llu"
+                " arrivals=%llu -- publication lapsed past %llu ns\n",
+                label, (unsigned long long)harness_delta_aged(ps, phase),
+                (unsigned long long)harness_delta_torn(ps, phase),
+                (unsigned long long)harness_delta_future(ps, phase),
+                (unsigned long long)arrivals,
+                (unsigned long long)ADCE_ADVICE_TIMEOUT_NS);
+        return 1;
+    }
+
+    /* The split has to account for the whole total, or the two assertions
+     * above could both pass while stale_reads carried something neither of
+     * them saw. */
+    ADCE_TEST_ASSERT(harness_delta_torn(ps, phase) +
+                     harness_delta_future(ps, phase) +
+                     harness_delta_aged(ps, phase) ==
+                     harness_delta_stale(ps, phase));
 
     /* And the same fact stated against the load: to the resolution the run
      * measures, still zero -- against 1000 for a blind phase. */
@@ -934,6 +965,26 @@ static int harness_check_blind_phase(const harness_phased_t *ps, int phase,
      * not merely some: the window is entirely past ADCE_ADVICE_TIMEOUT_NS. */
     ADCE_TEST_ASSERT(harness_delta_stale(ps, phase) == arrivals);
 
+    /* And every one of them by the AGED route specifically. This is the mirror
+     * of the aged == 0 assertion in the live check, and it is what stops that
+     * one from being vacuous: a classifier that never incremented aged_reads
+     * at all would satisfy "aged == 0" in every live phase and only this
+     * assertion would notice. Here the counter is driven to the full arrival
+     * count -- tens of thousands per slice -- so the live-phase zero is a
+     * statement about the system rather than about a dead counter.
+     *
+     * Exact rather than approximate, and that is a claim about the blind
+     * window rather than a tolerance: publication is stopped, so there are no
+     * seqlock writes to tear against and no publication that could land ahead
+     * of a caller's now_ns. Torn and future both require a concurrent
+     * publication, so both must be zero here, and every stale read must be
+     * aged. A nonzero torn or future in a blind slice would mean publication
+     * had not actually stopped when the slice was measured. */
+    ADCE_TEST_ASSERT(harness_delta_aged(ps, phase) ==
+                     harness_delta_stale(ps, phase));
+    ADCE_TEST_ASSERT(harness_delta_torn(ps, phase) == 0);
+    ADCE_TEST_ASSERT(harness_delta_future(ps, phase) == 0);
+
     /* Requirement 3. The band, not a point value. */
     permille = harness_permille(harness_delta_shed(ps, phase), arrivals);
     if (permille < HARNESS_STALE_BAND_LO || permille > HARNESS_STALE_BAND_HI) {
@@ -948,6 +999,85 @@ static int harness_check_blind_phase(const harness_phased_t *ps, int phase,
      * makes a non-maximal fallback safe (section 4). */
     ADCE_TEST_ASSERT(harness_delta_admitted(ps, phase, phase + 1) <=
                      harness_ceiling(ps, phase, phase + 1));
+
+    return 0;
+}
+
+/* The split's teeth, deterministically and without a running system.
+ *
+ * The live-phase assertion used to be delta_stale <= publications_bound. That
+ * predicate cannot see a small number of AGED reads at all: five aged reads
+ * against a bound of 31 satisfied it exactly as well as five torn ones, even
+ * though the two mean opposite things -- five straddles are the seqlock
+ * working, five aged reads are publication having lapsed past 50 ms. The
+ * region 0 < aged <= publications_bound is precisely the detection gap the
+ * split closes, and it is the reason to split rather than merely to classify.
+ *
+ * Driven through harness_check_live_phase itself on synthetic snapshots, so it
+ * is the shipped predicate under test and not a restatement of it. Timing is
+ * not involved: an aged window small enough to land inside the old bound would
+ * need to be about 30 us wide against a 250 us ingress pace, which is not a
+ * thing a test can schedule reliably. */
+static int test_harness_stale_split_teeth(void) {
+    const int phase = HARNESS_PH_LIVE;
+    harness_phased_t ps;
+    uint64_t bound;
+
+    /* A 300 ms phase carrying 240,000 arrivals and no shedding: the ceiling
+     * and band checks are satisfied throughout, so every verdict below is the
+     * stale split's alone. */
+    /* The cases below deliberately drive harness_check_live_phase to its
+     * failure path, which reports on stderr. Announcing that here keeps a
+     * GREEN run's output from reading as a red one -- same convention as the
+     * INVERTED line in harness_tap_after_gate. */
+    printf("  HARNESS teeth: the FAIL lines below are EXPECTED --"
+           " harness_check_live_phase is under test\n");
+    fflush(stdout);
+
+    memset(&ps, 0, sizeof(ps));
+    ps.snap[phase].at_ns = 0;
+    ps.snap[phase + 1].at_ns = ADCE_OBS_EPOCH_NS * 30ULL;
+    ps.snap[phase + 1].tapped = 240000;
+
+    bound = harness_publications_bound(&ps, phase);
+    ADCE_TEST_ASSERT(bound == 31);
+
+    /* Straddles at the bound: publication-scaled, and legal. */
+    ps.snap[phase + 1].torn = 25;
+    ps.snap[phase + 1].future = 6;
+    ps.snap[phase + 1].aged = 0;
+    ps.snap[phase + 1].stale = 31;
+    ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-legal") == 0);
+
+    /* One past it: still publication-scaled, still caught, as before. */
+    ps.snap[phase + 1].torn = 26;
+    ps.snap[phase + 1].stale = 32;
+    ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-over") == 1);
+
+    /* THE GAP. Five aged reads and nothing else. delta_stale is 5, which the
+     * old predicate compared against 31 and passed. The split fails it,
+     * because aged has no publication-derived allowance at all. */
+    ps.snap[phase + 1].torn = 0;
+    ps.snap[phase + 1].future = 0;
+    ps.snap[phase + 1].aged = 5;
+    ps.snap[phase + 1].stale = 5;
+    ADCE_TEST_ASSERT(harness_delta_stale(&ps, phase) <=
+                     harness_publications_bound(&ps, phase));
+    ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-gap") == 1);
+
+    /* A single aged read is enough. Zero is the bound, so there is no
+     * threshold below which one is tolerated. */
+    ps.snap[phase + 1].aged = 1;
+    ps.snap[phase + 1].stale = 1;
+    ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-one") == 1);
+
+    /* And the split must account for the whole total: a stale count carrying
+     * something no route claims is a failure rather than a rounding artefact. */
+    ps.snap[phase + 1].torn = 1;
+    ps.snap[phase + 1].future = 0;
+    ps.snap[phase + 1].aged = 0;
+    ps.snap[phase + 1].stale = 2;
+    ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-identity") == 1);
 
     return 0;
 }
@@ -1241,3 +1371,4 @@ ADCE_HARNESS_TEST_EXPORT(harness_tap_after_gate)
 ADCE_HARNESS_TEST_EXPORT(harness_observer_lifecycle)
 ADCE_HARNESS_TEST_EXPORT(harness_concurrent)
 ADCE_HARNESS_TEST_EXPORT(harness_stale_posture)
+ADCE_HARNESS_TEST_EXPORT(harness_stale_split_teeth)

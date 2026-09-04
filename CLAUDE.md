@@ -341,6 +341,26 @@ it.
   three, the reading of WHY the bound is unsound does not depend on reproducing it, because it
   follows from the derivation covering straddles only. Do not quote 261 as a rate; it is one
   observation, the same error shape as 0.067 and 0.65%.
+
+  SPLIT LANDED. `harness_check_live_phase` now asserts `torn + future <= publications_bound`
+  and `aged == 0` separately, and because the function is shared this applies to LIVE and
+  RECOVERED alike -- deliberately, since the scaling argument turns on whether a route needs a
+  concurrent publication and not on which phase is being measured. The blind phases assert the
+  mirror (`aged == stale`, `torn == future == 0`), which is what stops `aged == 0` from being
+  vacuous: it drives the same counter to the full arrival count.
+
+  `aged == 0` is the assertion `verify.sh`'s comment warns about when it declines to pin to one
+  core -- a starved closer is a host artefact, and unattributable reds are worse than a weaker
+  hunt. What retires that objection is ATTRIBUTION, not a change of opinion: the failure prints
+  `aged=N` beside torn and future, naming the cause. If this ever goes red on a loaded runner,
+  read the split before assuming a defect.
+
+  Teeth proved both ways. A closer stalled for twice the timeout inside a live phase (scratch
+  copy, harness code only) fires it with `aged=40704 torn=0 future=0`. But that case would have
+  breached the OLD summed bound too, so it does not justify the split on its own;
+  `harness_stale_split_teeth` covers the part that does, deterministically and without timing:
+  `aged=5` with `stale=5` against a bound of 31 passes the old predicate and fails the new one.
+  The region `0 < aged <= publications_bound` is the whole detection gap.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
