@@ -486,12 +486,16 @@ static int test_harness_concurrent(void) {
      * and the bucket starts full so the opening arrivals admit. */
     {
         uint64_t admitted = 0, shed = 0, limit = 0, stale = 0;
+        uint64_t torn = 0, future = 0, aged = 0;
         for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
             ADCE_TEST_ASSERT(g_h_sites[i].enf.admitted <= ceiling);
             admitted += g_h_sites[i].enf.admitted;
             shed += g_h_sites[i].enf.dropped_shed;
             limit += g_h_sites[i].enf.dropped_limit;
             stale += g_h_sites[i].enf.stale_reads;
+            torn += g_h_sites[i].enf.torn_reads;
+            future += g_h_sites[i].enf.future_reads;
+            aged += g_h_sites[i].enf.aged_reads;
         }
         ADCE_TEST_ASSERT(admitted > 0);
         ADCE_TEST_ASSERT(shed > 0);
@@ -506,6 +510,53 @@ static int test_harness_concurrent(void) {
                (unsigned long long)obs.late_epochs,
                (unsigned long long)obs.skipped_epochs,
                (unsigned long long)obs.discarded_arrivals);
+
+        printf("  HARNESS concurrent routes: torn=%llu future=%llu aged=%llu"
+               " | stale=%llu bound/thread=%llu\n",
+               (unsigned long long)torn, (unsigned long long)future,
+               (unsigned long long)aged, (unsigned long long)stale,
+               (unsigned long long)(obs.ctx.publications + 1));
+
+        /* The identity, which holds regardless of how the total splits. */
+        ADCE_TEST_ASSERT(torn + future + aged == stale);
+
+        /* AGED is deliberately NOT bounded at zero here, and the reason is
+         * structural rather than a tolerance.
+         *
+         * These counters are absolute totals from thread start, not a windowed
+         * delta. The run therefore INCLUDES the warmup -- ADCE_OBS_WARMUP_EPOCHS
+         * is 100 epochs, a full second, during which adce_obs_epoch_close
+         * advances its statistics but publishes nothing, so the epoch state
+         * keeps observed_at_ns == 0 and every arrival classifies as cold-start
+         * AGED with a perfectly valid snapshot. Measured: aged was 2972672 of
+         * 3870720 taps, 76.8%, against a warmup that is 1 s of a ~1.3 s run --
+         * 76.9%. The count IS the warmup window, to rounding.
+         *
+         * That is why harness_stale_posture can assert aged == 0 and this
+         * cannot: there, HARNESS_PH_LIVE is a delta taken after publication is
+         * confirmed healthy, and HARNESS_PH_PRIME absorbs exactly this window
+         * and is measured but asserted only for the ceiling. The two tests
+         * differ in whether warmup is inside the measured window, not in
+         * whether the closer can starve. Asserting zero here would fail on
+         * every run for a reason that is the design working. */
+        ADCE_TEST_ASSERT(aged > 0);
+
+        /* TORN and FUTURE are bounded, and this is the half the scaling
+         * argument does carry over unchanged: both require a concurrent
+         * publication, and a sequential thread can straddle at most one at a
+         * time, so each thread's count is bounded by the publications that
+         * actually occurred -- available exactly here, unlike in
+         * harness_stale_posture where it has to be derived from a window
+         * duration. The +1 covers a publication straddling the run's edge.
+         *
+         * Per thread rather than aggregated, matching the shape
+         * harness_check_live_phase asserts, so a single pathological thread
+         * cannot hide inside three quiet ones. */
+        for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
+            ADCE_TEST_ASSERT(g_h_sites[i].enf.torn_reads +
+                             g_h_sites[i].enf.future_reads <=
+                             obs.ctx.publications + 1);
+        }
     }
 
     /* Conservation across the observer boundary. The observer drained the

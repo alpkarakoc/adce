@@ -511,6 +511,40 @@ against a bound of 31 **passes the old predicate and fails the split**. The regi
 `0 < aged <= publications_bound` is the detection gap the split closes, and it is the reason to
 split rather than merely to classify.
 
+### The same split does not transfer wholesale to `test_harness_concurrent`
+
+`harness_concurrent` publishes continuously — 31 publications, no freeze — so the scaling
+argument reads as though it should carry over unchanged. Half of it does. The other half is
+refuted by measurement, and the reason is worth stating because it is about *what window is
+being measured*, not about the routes:
+
+```
+HARNESS concurrent tapped=3870720 stale=2972676 publications=31
+HARNESS concurrent routes: torn=4 future=0 aged=2972672
+```
+
+`aged` is 76.8% of all taps. That is not closer starvation — it is **warmup**.
+`ADCE_OBS_WARMUP_EPOCHS` is 100 epochs, a full second, during which `adce_obs_epoch_close`
+advances its statistics but publishes nothing; the epoch state keeps `observed_at_ns == 0`, so
+every arrival classifies as **cold-start aged with a perfectly valid snapshot**. Warmup is 1 s
+of a ~1.3 s run — 76.9%. The count *is* the warmup window, to rounding.
+
+So the two tests differ in whether warmup sits inside the measured window, not in whether the
+closer can starve. `harness_stale_posture` measures `HARNESS_PH_LIVE` as a *delta* taken after
+publication is confirmed healthy, and `HARNESS_PH_PRIME` absorbs exactly this window — measured,
+asserted only for the ceiling. `harness_concurrent` has no phase structure; its counters are
+absolute totals from thread start. **Asserting `aged == 0` there would fail on every run for a
+reason that is the design working.**
+
+What does transfer is the publication-scaled half, and it transfers in a tighter form. Torn and
+future still require a concurrent publication, and here the true publication count is available
+directly rather than derived from a window duration, so the bound is
+`torn + future <= publications + 1` **per thread** — the same per-site shape
+`harness_check_live_phase` uses, so one pathological thread cannot hide inside three quiet ones.
+Measured at 4 across all four threads under strict `-O2` and 22 under TSan, against a bound of
+32. `aged > 0` is asserted instead of the old bare `stale > 0`, which states the cold-start
+posture actually ran rather than merely that something read stale.
+
 **This is a diagnosis of the bound, not yet a reproduction.** The route split now printed by
 the harness is what would settle it: torn and future belong under the publications bound,
 whereas any nonzero **aged** term in the recovered phase means the bound is being applied to a
