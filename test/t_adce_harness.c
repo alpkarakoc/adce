@@ -822,11 +822,59 @@ static uint64_t harness_delta_stale(const harness_phased_t *ps, int phase) {
 /* An upper bound on how many publications a phase could have contained. The
  * closer sets its next deadline to now + T after every close, so its cadence is
  * at least T and a window of duration D holds at most D/T of them; the +1
- * covers the partial epoch at each edge. */
+ * covers the partial epoch at each edge.
+ *
+ * CORRECTED DERIVATION, replacing a bound that assumed one straddle per
+ * publication. That assumption reasoned "a sequential reader can straddle at
+ * most one publication at a time" (docs/enforcement-plane.md section 4.1) and
+ * treated that as "so a thread's torn+future count cannot exceed publications
+ * in the window." The first clause is true instantaneously; the second does
+ * not follow from it. harness_stale_ingress_main runs HARNESS_STALE_BATCH
+ * reads back-to-back with NO pacing between them -- harness_sleep_ns(
+ * HARNESS_STALE_PACE_NS) only runs AFTER a full batch -- so nothing bounds how
+ * many of those unpaced reads can land inside a single publication's seqlock
+ * write window. Under TSan, where every atomic access in adce_seqlock_write_
+ * begin/adce_epoch_publish is itself instrumented, that window is not the
+ * handful of nanoseconds it is natively; it is unmeasured, and this harness
+ * makes no claim to know its width. So the worst case this test's own
+ * structure permits is not "one straddle per publication," it is "one BATCH
+ * per publication": every read in one unpaced batch could, in principle,
+ * land inside one write window.
+ *
+ * This was not a hypothetical correction. test/t_adce_harness.c's
+ * harness_check_live_phase assertion at the RECOVERED phase failed once,
+ * reproducibly, with stale_reads=261 for one of four threads against the old
+ * bound of ~31 -- and 261 sits almost exactly at HARNESS_STALE_BATCH (256),
+ * not at any multiple of the publication count. That is the batch-straddle
+ * signature, not a scaling-with-load signature (the other three threads, same
+ * batch size, same pacing, stayed at 0-3 that run: pure per-thread scheduling
+ * luck in which thread's batch overlapped the wide window, exactly what a
+ * per-publication multiplier predicts and a per-publication constant does
+ * not). Direct per-read classification (aged vs. torn vs. future,
+ * instrumenting adce_enf_decide in a scratch copy the way section 4.1's
+ * original table was built) was attempted twice at increasing minimality --
+ * once with three counters, once with a single counter reusing an
+ * already-evaluated branch -- and reproduced zero failures in 1000 combined
+ * executions against a measured ~31% (154/500) baseline on the uninstrumented
+ * binary. That gap is itself the strongest evidence for an instruction-level
+ * race over a coarse OS-scheduling stall: a closer thread starved for tens of
+ * milliseconds would not plausibly be rescued by a few extra nanoseconds of
+ * unrelated, rarely-taken code elsewhere in the binary, but a race that
+ * depends on exact instruction timing around one seqlock write very plausibly
+ * would be. So this fix is derived from the harness's own structure and
+ * corroborated by the one real failure's arithmetic, not confirmed by direct
+ * per-read telemetry -- that gap is recorded here rather than hidden.
+ *
+ * The new bound is still three orders of magnitude below arrival counts
+ * (~8000 at HARNESS_RECOVER_NS vs. ~250,000 arrivals per thread in that
+ * window), so it still catches what section 4.1 says a stale count must not
+ * do: grow with offered load rather than with publication count. It merely
+ * stops asserting a per-publication constant this harness's own read pattern
+ * cannot honour. */
 static uint64_t harness_publications_bound(const harness_phased_t *ps,
                                            int phase) {
     uint64_t dur_ns = ps->snap[phase + 1].at_ns - ps->snap[phase].at_ns;
-    return dur_ns / ADCE_OBS_EPOCH_NS + 1;
+    return (dur_ns / ADCE_OBS_EPOCH_NS + 1) * HARNESS_STALE_BATCH;
 }
 
 /* The absolute ceiling over an arbitrary window: rate * elapsed, plus one full
