@@ -709,6 +709,14 @@ function takes the draw as a parameter:
   threshold would hide inside the variance. It needs an allocator interposer and a syscall
   counter, neither of which exists in this repository yet.
 - Closed-loop behaviour: whether pressure and admitted rate settle or oscillate.
+  **Designed in `docs/closed-loop-harness.md`; still unmeasured.** That document
+  splits the question in two, which this bullet did not: the INTERNAL loop through
+  the counter is cut by tap placement and yields an exact, timing-free assertion
+  (the published pressure trajectory is invariant to the draw stream), while the
+  EXTERNAL loop through a retrying or backing-off client needs a client model this
+  repository does not have and can only be measured. It also derives two numbers
+  §1.2 states qualitatively: an exponential ramp alarms only above ~8.98% growth per
+  epoch, and no exponential ramp at any rate can saturate the squash while N < 125.
 - Observer death mid-flight: the watchdog trips, the fallback engages, and the system does
   not fail open.
 - Multi-thread bucket behaviour and the `threads × rate` aggregate ceiling.
