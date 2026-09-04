@@ -510,6 +510,140 @@ static int test_enf_shed_fraction(void) {
 }
 
 /* =====================================================================
+ * 9. The three routes into the stale verdict, classified.
+ * ===================================================================== */
+
+/* The regression this case exists for: a TORN read must not read as AGED.
+ *
+ * adce_epoch_read returns 0 without writing its out-parameters, so the caller's
+ * observed_at_ns keeps its initialiser. A classifier that looked only at the
+ * timestamps would evaluate now_ns - 0, a full monotonic clock reading, and
+ * report AGED -- the one route the harness measurements say never occurs. That
+ * is worse than not classifying at all: it manufactures a phantom of the exact
+ * thing the instrument is meant to hunt. */
+static int test_enf_stale_route_classify(void) {
+    const uint64_t t0 = ADCE_ADVICE_TIMEOUT_NS * 4;
+
+    /* Torn, with the timestamp that would otherwise read as maximally aged.
+     * have_snapshot is the ONLY thing separating this from the cold-start case
+     * below, which is why three fields cannot do it. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(0, 0, t0) == ADCE_ENF_STALE_TORN);
+
+    /* Torn dominates every timestamp, including ones that would otherwise
+     * classify as future or fresh: the value is not merely stale, it is
+     * meaningless, because nothing wrote it. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(0, t0 + 1, t0) ==
+                     ADCE_ENF_STALE_TORN);
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(0, t0, t0) ==
+                     ADCE_ENF_STALE_TORN);
+
+    /* Cold start: a zero-initialised epoch is genuinely zero WITH a valid
+     * snapshot, so it is aged rather than torn. This is the pair that
+     * `observed_at_ns == 0` could never have separated. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, 0, t0) == ADCE_ENF_STALE_AGED);
+
+    /* Future, by one nanosecond. Classified before the subtraction, because
+     * the subtraction is the deliberate unsigned wrap. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, t0 + 1, t0) ==
+                     ADCE_ENF_STALE_FUTURE);
+
+    /* The far end of the same route: a wildly future timestamp is future, not
+     * aged, even though the wrapped difference is enormous. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, UINT64_MAX, t0) ==
+                     ADCE_ENF_STALE_FUTURE);
+
+    /* The timeout boundary, both sides, matching adce_epoch_is_stale's strict
+     * greater-than. Equal is fresh; one past it is aged. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, t0, t0 + ADCE_ADVICE_TIMEOUT_NS)
+                     == ADCE_ENF_FRESH);
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, t0,
+                                             t0 + ADCE_ADVICE_TIMEOUT_NS + 1)
+                     == ADCE_ENF_STALE_AGED);
+
+    /* Same instant is fresh, not future: the comparison is strict. */
+    ADCE_TEST_ASSERT(adce_enf_classify_stale(1, t0, t0) == ADCE_ENF_FRESH);
+
+    return 0;
+}
+
+/* The classifier replaced the gate's staleness predicate, so it has to decide
+ * the VERDICT identically to the expression it replaced. Asserted over a grid
+ * that straddles the timeout boundary and the unsigned wrap in both
+ * directions, for both values of have_snapshot, rather than at the handful of
+ * points above. */
+static int test_enf_stale_route_equivalence(void) {
+    const uint64_t base = ADCE_ADVICE_TIMEOUT_NS * 4;
+    int have;
+    int i;
+
+    static const int64_t offsets[] = {
+        -(int64_t)ADCE_ADVICE_TIMEOUT_NS * 2,
+        -(int64_t)ADCE_ADVICE_TIMEOUT_NS - 1,
+        -(int64_t)ADCE_ADVICE_TIMEOUT_NS,
+        -(int64_t)ADCE_ADVICE_TIMEOUT_NS + 1,
+        -1, 0, 1,
+        (int64_t)ADCE_ADVICE_TIMEOUT_NS
+    };
+
+    for (have = 0; have <= 1; ++have) {
+        for (i = 0; i < (int)(sizeof(offsets) / sizeof(offsets[0])); ++i) {
+            uint64_t observed = (uint64_t)((int64_t)base + offsets[i]);
+            adce_enf_stale_route_t route =
+                adce_enf_classify_stale(have, observed, base);
+            /* The predicate adce_enf_decide used before the classifier. */
+            int legacy = (!have || adce_epoch_is_stale(observed, base));
+
+            ADCE_TEST_ASSERT((route != ADCE_ENF_FRESH) == legacy);
+        }
+    }
+
+    return 0;
+}
+
+/* The split is an identity against the total, not a parallel tally, because
+ * adce_enf_decide derives both from one classification. Driven through the
+ * gate so it is the shipped path being checked. */
+static int test_enf_stale_route_identity(void) {
+    adce_enf_ctx_t ctx;
+    const uint64_t t0 = ADCE_ADVICE_TIMEOUT_NS * 4;
+
+    enf_fresh(&ctx, t0);
+
+    /* Cold start: epoch is zero-initialised, so this is AGED with a valid
+     * snapshot. */
+    (void)adce_enf_decide(&ctx, t0, enf_draw(65535));
+    ADCE_TEST_ASSERT(ctx.stale_reads == 1);
+    ADCE_TEST_ASSERT(ctx.aged_reads == 1);
+    ADCE_TEST_ASSERT(ctx.torn_reads == 0);
+    ADCE_TEST_ASSERT(ctx.future_reads == 0);
+
+    /* A fresh publication: no route taken, so no counter moves. */
+    adce_epoch_publish(&g_enf_epoch, 0, 1, t0);
+    (void)adce_enf_decide(&ctx, t0, enf_draw(65535));
+    ADCE_TEST_ASSERT(ctx.stale_reads == 1);
+
+    /* Aged again, one nanosecond past the timeout. */
+    (void)adce_enf_decide(&ctx, t0 + ADCE_ADVICE_TIMEOUT_NS + 1,
+                          enf_draw(65535));
+    ADCE_TEST_ASSERT(ctx.aged_reads == 2);
+
+    /* Future: the gate's now_ns precedes the publication it reads, which is
+     * the ordinary ingress race of section 4.1, not a broken clock. */
+    adce_epoch_publish(&g_enf_epoch, 0, 2, t0 + 1000);
+    (void)adce_enf_decide(&ctx, t0, enf_draw(65535));
+    ADCE_TEST_ASSERT(ctx.future_reads == 1);
+
+    /* The identity, over every decision above. A torn read cannot be produced
+     * in-process -- adce_seqlock_read_begin spins while the sequence is odd --
+     * so torn_reads stays 0 here and is covered exhaustively by
+     * enf_stale_route_classify instead. */
+    ADCE_TEST_ASSERT(ctx.torn_reads + ctx.future_reads + ctx.aged_reads ==
+                     ctx.stale_reads);
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -525,3 +659,6 @@ ADCE_ENF_TEST_EXPORT(enf_cold_start)
 ADCE_ENF_TEST_EXPORT(enf_bucket_ceiling)
 ADCE_ENF_TEST_EXPORT(enf_determinism)
 ADCE_ENF_TEST_EXPORT(enf_shed_fraction)
+ADCE_ENF_TEST_EXPORT(enf_stale_route_classify)
+ADCE_ENF_TEST_EXPORT(enf_stale_route_equivalence)
+ADCE_ENF_TEST_EXPORT(enf_stale_route_identity)

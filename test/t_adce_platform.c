@@ -314,6 +314,9 @@ int adce_t_enf_cold_start(void);
 int adce_t_enf_bucket_ceiling(void);
 int adce_t_enf_determinism(void);
 int adce_t_enf_shed_fraction(void);
+int adce_t_enf_stale_route_classify(void);
+int adce_t_enf_stale_route_equivalence(void);
+int adce_t_enf_stale_route_identity(void);
 
 /* Integration harness cases, same convention, in test/t_adce_harness.c. These
  * are the only cases that test a call ORDER rather than a function, so they are
@@ -360,6 +363,9 @@ int main(void) {
         {"enf_bucket_ceiling", adce_t_enf_bucket_ceiling},
         {"enf_determinism", adce_t_enf_determinism},
         {"enf_shed_fraction", adce_t_enf_shed_fraction},
+        {"enf_stale_route_classify", adce_t_enf_stale_route_classify},
+        {"enf_stale_route_equivalence", adce_t_enf_stale_route_equivalence},
+        {"enf_stale_route_identity", adce_t_enf_stale_route_identity},
         {"harness_tap_before_gate", adce_t_harness_tap_before_gate},
         {"harness_tap_after_gate", adce_t_harness_tap_after_gate},
         {"harness_observer_lifecycle", adce_t_harness_observer_lifecycle},

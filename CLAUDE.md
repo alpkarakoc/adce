@@ -273,6 +273,15 @@ it.
   `now_ns - observed_at_ns > ADCE_ADVICE_TIMEOUT_NS` is aged. `publication_count` is not
   needed for the classification at all -- it is the denominator of the bound assertion, a
   separate purpose that the proposal folded into the same tuple.
+
+  LANDED as `adce_enf_classify_stale` in `include/adce_enforce.h`, with the three counters
+  `torn_reads` / `future_reads` / `aged_reads` on `adce_enf_ctx_t`. `adce_enf_decide` derives
+  the verdict AND the route from one classification rather than keeping a second predicate in
+  step, so the split is an identity against `stale_reads` instead of a parallel tally;
+  `enf_stale_route_equivalence` pins the verdict to the expression it replaced across the
+  timeout boundary and the wrap. Classification runs only on the stale branch, so the admit
+  path is untouched and the section 5 latency figures stand. The struct grew by 24 bytes --
+  additive, with no signature, return or failure change.
 - The instrumentation was never shown to suppress anything, and the ~0.65% rate it was
   chasing has no basis. Recorded because the comparison was run specifically to avoid
   building on the number, and because this is the third time in this project a single
@@ -301,6 +310,37 @@ it.
   The profile, meanwhile, moves this rate by 10x on its own: strict `-O2` averages 0.34 live
   stale reads per thread, TSan 3.57, measured in `docs/enforcement-plane.md` 4.2. A printf is
   not the largest perturbation in this experiment and never was.
+- The RECOVERED phase is checked with the LIVE phase's bound, and that bound's derivation
+  does not cover a thaw. `test_harness_stale_posture` calls
+  `harness_check_live_phase(ps, HARNESS_PH_RECOVERED, "recovered")` -- the same function, so
+  the same `delta_stale <= publications_bound` of ~31. There is no separate argument for the
+  recovered phase; the justification comment is written entirely about steady publication and
+  is reused across the thaw unexamined.
+
+  Two mechanisms are RULED OUT from the code, recorded so neither is chased again. Back-to-back
+  publications from a catch-up close cannot occur here: the closer advances
+  `deadline_ns = now_ns + T` on every fire INCLUDING while frozen, the close is a single `if`
+  rather than a catch-up loop, and `adce_obs_epoch_close` publishes at most once per call. And
+  a publication cannot silently fail after warmup -- the sigma floor clamps sigma, it never
+  skips the publish.
+
+  What the derivation misses is that the bound counts STRADDLES while an aged read is not a
+  straddle. Torn and future need a concurrent publication and are publication-bounded; aged
+  needs only a frozen epoch and is ARRIVAL-bounded. `HARNESS_STALE_BATCH` is 256, so one batch
+  landing in a still-aged window contributes ~256 against a bound of ~31. A reported
+  `recovered=261` on one site against `recovered=1` on another has exactly that shape, and the
+  per-site asymmetry rules out a global stall. **This is a diagnosis, not a reproduction**, and
+  the distinction is the point: the route split now printed by the harness is what would settle
+  it, because a nonzero AGED term in the recovered phase is the signature and torn/future are
+  not.
+
+  RUN, and it did not reproduce: 400 TSan executions, 0 failures, recovered stale peaking at 11
+  against the bound of 31 and **aged zero across all 1600 thread-samples**. The predicted
+  signature never appeared. Budget not extended. So the recovered bound is now the FOURTH
+  number in this project whose supporting event cannot be reproduced -- and unlike the earlier
+  three, the reading of WHY the bound is unsound does not depend on reproducing it, because it
+  follows from the derivation covering straddles only. Do not quote 261 as a rate; it is one
+  observation, the same error shape as 0.067 and 0.65%.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of

@@ -609,6 +609,12 @@ typedef struct {
     uint64_t shed;
     uint64_t limit;
     uint64_t stale;
+    /* The stale total split by route (section 4.1). Carried per phase because
+     * the routes have different bounds: torn and future are bounded by
+     * publications in the window, aged only by arrivals. */
+    uint64_t torn;
+    uint64_t future;
+    uint64_t aged;
 } harness_snap_t;
 
 /* Composition rather than extra fields on harness_site_t: the ordering cases
@@ -649,6 +655,9 @@ static void harness_snap_take(harness_snap_t *snap, const harness_site_t *site) 
     snap->shed = site->enf.dropped_shed;
     snap->limit = site->enf.dropped_limit;
     snap->stale = site->enf.stale_reads;
+    snap->torn = site->enf.torn_reads;
+    snap->future = site->enf.future_reads;
+    snap->aged = site->enf.aged_reads;
 }
 
 static uint64_t harness_permille(uint64_t part, uint64_t whole) {
@@ -817,6 +826,18 @@ static uint64_t harness_delta_shed(const harness_phased_t *ps, int phase) {
 
 static uint64_t harness_delta_stale(const harness_phased_t *ps, int phase) {
     return ps->snap[phase + 1].stale - ps->snap[phase].stale;
+}
+
+static uint64_t harness_delta_torn(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].torn - ps->snap[phase].torn;
+}
+
+static uint64_t harness_delta_future(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].future - ps->snap[phase].future;
+}
+
+static uint64_t harness_delta_aged(const harness_phased_t *ps, int phase) {
+    return ps->snap[phase + 1].aged - ps->snap[phase].aged;
 }
 
 /* An upper bound on how many publications a phase could have contained. The
@@ -1069,11 +1090,15 @@ static int test_harness_stale_posture(void) {
     ADCE_TEST_ASSERT(g_st_obs.epochs_closed >= ADCE_OBS_WARMUP_EPOCHS);
     ADCE_TEST_ASSERT(g_st_obs.publications > 1);
 
+    /* Reporting is a SEPARATE pass from checking, and deliberately so. These
+     * loops were one, so the first failing site aborted the run before the
+     * sites after it had printed -- exactly the diagnostic needed to tell a
+     * per-thread mechanism from a global one, discarded at the moment it
+     * became interesting. Every site reports, then every site is checked. */
     for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
         const harness_phased_t *ps = &g_st_sites[i];
         uint64_t live_pm;
         uint64_t blind_pm;
-        int phase;
 
         live_pm = harness_permille(harness_delta_shed(ps, HARNESS_PH_LIVE),
                                    harness_delta_arrivals(ps, HARNESS_PH_LIVE));
@@ -1104,11 +1129,56 @@ static int test_harness_stale_posture(void) {
                                                           HARNESS_PH_END),
                (unsigned long long)harness_ceiling(ps, HARNESS_PH_PRIME,
                                                    HARNESS_PH_END));
+
+        /* The route split for the two phases that assert a publications-derived
+         * bound. A count that breaches that bound is only diagnosable with this
+         * line: torn and future are bounded by publications and belong under
+         * it, whereas aged is bounded by ARRIVALS and does not -- so an aged
+         * term here says the bound is being applied to a regime its derivation
+         * never covered, not that the seqlock is tearing more than expected. */
+        printf("  HARNESS stale[%d] routes: live torn=%llu future=%llu"
+               " aged=%llu | recovered torn=%llu future=%llu aged=%llu"
+               " | bound live=%llu recovered=%llu\n",
+               (int)i,
+               (unsigned long long)harness_delta_torn(ps, HARNESS_PH_LIVE),
+               (unsigned long long)harness_delta_future(ps, HARNESS_PH_LIVE),
+               (unsigned long long)harness_delta_aged(ps, HARNESS_PH_LIVE),
+               (unsigned long long)harness_delta_torn(ps,
+                                                      HARNESS_PH_RECOVERED),
+               (unsigned long long)harness_delta_future(ps,
+                                                        HARNESS_PH_RECOVERED),
+               (unsigned long long)harness_delta_aged(ps,
+                                                      HARNESS_PH_RECOVERED),
+               (unsigned long long)harness_publications_bound(
+                   ps, HARNESS_PH_LIVE),
+               (unsigned long long)harness_publications_bound(
+                   ps, HARNESS_PH_RECOVERED));
+
+        /* The same identity the gate enforces, restated per phase: a split
+         * that did not sum to the total would make every route number above
+         * unreadable. */
+        ADCE_TEST_ASSERT(harness_delta_torn(ps, HARNESS_PH_RECOVERED) +
+                         harness_delta_future(ps, HARNESS_PH_RECOVERED) +
+                         harness_delta_aged(ps, HARNESS_PH_RECOVERED) ==
+                         harness_delta_stale(ps, HARNESS_PH_RECOVERED));
         /* The tap ordering still holds under this scenario. Free to check, and
          * it rules out the deltas below being measured off a site that had
          * stopped accounting for its arrivals. */
         ADCE_TEST_ASSERT(site_identity_holds(&ps->site));
         total_tapped += ps->site.tapped;
+    }
+
+    for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
+        const harness_phased_t *ps = &g_st_sites[i];
+        uint64_t live_pm;
+        uint64_t blind_pm;
+        int phase;
+
+        live_pm = harness_permille(harness_delta_shed(ps, HARNESS_PH_LIVE),
+                                   harness_delta_arrivals(ps, HARNESS_PH_LIVE));
+        blind_pm =
+            harness_permille(harness_delta_shed(ps, HARNESS_PH_BLIND_B),
+                             harness_delta_arrivals(ps, HARNESS_PH_BLIND_B));
 
         ADCE_TEST_ASSERT(harness_check_live_phase(ps, HARNESS_PH_LIVE,
                                                   "live") == 0);
