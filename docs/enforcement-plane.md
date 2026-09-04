@@ -354,10 +354,37 @@ reader seeing nonzero `stale_reads` on a healthy system had nothing to check it 
    reader cannot order the publication against its own clock.
 
 **Both 2 and 3 require a concurrent publication.** A sequential reader can straddle at most
-one publication at a time, so their combined count is bounded by *publications in the
-window*, never by arrivals. It does not grow with offered load. That is what distinguishes
-them from the posture genuinely engaging, and it is the bound the harness asserts rather
-than asserting zero.
+one publication *at an instant*, but that does not mean a thread's combined torn+future count
+is bounded by publications in the window — see the correction below. What is still true, and
+is the property the harness actually needs: their combined count does not grow with offered
+load, only with publication count and the reader's own burst structure. That is what
+distinguishes them from the posture genuinely engaging, and it is the shape of bound the
+harness asserts rather than asserting zero.
+
+**Correction, found by the integration harness rather than assumed away.**
+`harness_check_live_phase`'s bound was originally `publications_in_window`, on the reasoning
+above. `test/t_adce_harness.c`'s ingress threads run `HARNESS_STALE_BATCH` (256) reads
+back-to-back with no pacing *within* a batch — pacing runs only after a full batch — so
+nothing bounds how many of those unpaced reads can land inside one publication's seqlock
+write window. Under TSan, where every atomic access in the write path is itself
+instrumented, that window's width is unmeasured; the harness makes no claim to know it. The
+correct worst case this harness's own structure permits is one *batch* per publication, not
+one *read* per publication, so the bound is `publications_in_window * HARNESS_STALE_BATCH`.
+This was found, not designed in: the assertion failed once with `stale_reads=261` for one of
+four threads against the old bound of ~31, and 261 sits almost exactly at the batch size
+(256) rather than at any multiple of the publication count — the signature of one batch
+straddling one write, not of the posture actually engaging (the other three threads, same
+batch size and pacing, stayed at 0–3 stale reads that run). Direct per-read classification
+(the `aged`/`torn`/`future` counters this section's own measured table was built from) was
+attempted twice more against this specific failure, at increasing minimality, and reproduced
+zero times in 1000 combined executions against a measured ~31% per-execution baseline on the
+uninstrumented binary — evidence for an instruction-level race sensitive enough that even a
+few nanoseconds of added, rarely-taken code suppresses it, which a coarse OS-scheduling stall
+would not plausibly be. So this correction is derived from the harness's structure and
+corroborated by that one failure's arithmetic, not confirmed by direct per-read telemetry on
+the failing run itself — recorded as a gap rather than papered over. The corrected bound is
+still three orders of magnitude below arrival counts in the same window, so it still catches
+a count that scales with load rather than with publication count and batch size.
 
 **Measured**, over the harness's live phase — publication healthy throughout, four ingress
 threads:
