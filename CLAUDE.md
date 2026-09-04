@@ -361,6 +361,21 @@ it.
   `harness_stale_split_teeth` covers the part that does, deterministically and without timing:
   `aged=5` with `stale=5` against a bound of 31 passes the old predicate and fails the new one.
   The region `0 < aged <= publications_bound` is the whole detection gap.
+
+  The split does NOT transfer wholesale to `test_harness_concurrent`, and the measurement was
+  taken before asserting rather than after. `aged` there is 2972672 of 3870720 taps -- 76.8% --
+  and it is WARMUP, not closer starvation: 100 warmup epochs publish nothing, so `observed_at_ns`
+  stays 0 and every arrival is cold-start aged with a VALID snapshot. Warmup is 1 s of a ~1.3 s
+  run, 76.9%; the count is the warmup window to rounding. The two tests differ in whether warmup
+  is inside the measured window -- `harness_stale_posture` measures a post-warmup DELTA and lets
+  `HARNESS_PH_PRIME` absorb it -- not in whether the closer can starve. `aged == 0` there would
+  fail every run for a reason that is the design working, so it was not asserted.
+
+  What did land is the publication-scaled half in a TIGHTER form than stale_posture's, because
+  the true publication count is available at that point instead of having to be derived from a
+  window duration: `torn + future <= publications + 1` per thread. Measured 4 aggregate under
+  strict, 22 under TSan, bound 32. And `aged > 0` replaces a bare `stale > 0`, naming the
+  cold-start posture as the thing that ran.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
