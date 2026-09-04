@@ -541,9 +541,39 @@ future still require a concurrent publication, and here the true publication cou
 directly rather than derived from a window duration, so the bound is
 `torn + future <= publications + 1` **per thread** — the same per-site shape
 `harness_check_live_phase` uses, so one pathological thread cannot hide inside three quiet ones.
-Measured at 4 across all four threads under strict `-O2` and 22 under TSan, against a bound of
-32. `aged > 0` is asserted instead of the old bare `stale > 0`, which states the cold-start
-posture actually ran rather than merely that something read stale.
+`aged > 0` is asserted instead of the old bare `stale > 0`, which states the cold-start posture
+actually ran rather than merely that something read stale.
+
+#### The post-warmup window makes `aged == 0` assertable here too
+
+The axis was never publication continuity — it was whether warmup sits inside the measured
+window. So the test now takes one `harness_snap_t` per site at the **confirmed first
+publication**, the same confirmation it already performed, and asserts the phased harness's
+live-phase shape over the delta: `torn + future <= publications + 1`, and `aged == 0`.
+
+Each ingress thread snapshots its own site, as in the phased harness, because main reading a
+running thread's counters would be a data race no seqlock covers — these are plain per-thread
+counters, not published state.
+
+**The snapshot cannot perturb the conservation identity**, and the reason is structural rather
+than empirical. `total_tapped == arrivals_closed + discarded + residual` is a statement about
+where *arrivals* go. A snapshot moves no arrival: it only reads `site->tapped` and
+`site->enf.*` and writes into storage appearing on neither side. Contrast `g_st_thaw_discarded`
+in the phased harness, which had to be added to *both* sides precisely because it is a drain
+that removes arrivals from the counter. A snapshot removes nothing, so it needs no matching
+term.
+
+Measured over the post-warmup window, per thread:
+
+| profile | `torn` | `future` | `aged` | tapped in window |
+| --- | --- | --- | --- | --- |
+| strict `-O2` | 0 | 0 | **0** | ~230,000 |
+| TSan | 1–4 | 0 | **0** | ~158,000 |
+
+Aged is zero on every thread and every profile, which is what the derivation predicted once the
+window excludes warmup. The bound has teeth: five aged reads injected into one site after its
+snapshot fire it — `aged=5 torn=0 future=0` — a total of five against a bound of 32, which a
+predicate summing the routes would pass and only the separate `aged == 0` can see.
 
 **This is a diagnosis of the bound, not yet a reproduction.** The route split now printed by
 the harness is what would settle it: torn and future belong under the publications bound,

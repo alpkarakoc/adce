@@ -335,8 +335,62 @@ static adce_epoch_state_t g_h_epoch;
 static harness_site_t g_h_sites[HARNESS_INGRESS_THREADS];
 static _Atomic int g_h_stop;
 
+/* Snapshot of one site's counters at an instant. Defined here rather than
+ * beside the phased harness below because BOTH concurrent cases need it: the
+ * phased one to bound each phase, and harness_concurrent to establish a
+ * post-warmup baseline. */
+typedef struct {
+    uint64_t at_ns;
+    uint64_t tapped;
+    uint64_t admitted;
+    uint64_t shed;
+    uint64_t limit;
+    uint64_t stale;
+    /* The stale total split by route (section 4.1). Carried per phase because
+     * the routes have different bounds: torn and future are bounded by
+     * publications in the window, aged only by arrivals. */
+    uint64_t torn;
+    uint64_t future;
+    uint64_t aged;
+} harness_snap_t;
+
+static void harness_snap_take(harness_snap_t *snap, const harness_site_t *site) {
+    snap->at_ns = adce_now_ns();
+    snap->tapped = site->tapped;
+    snap->admitted = site->enf.admitted;
+    snap->shed = site->enf.dropped_shed;
+    snap->limit = site->enf.dropped_limit;
+    snap->stale = site->enf.stale_reads;
+    snap->torn = site->enf.torn_reads;
+    snap->future = site->enf.future_reads;
+    snap->aged = site->enf.aged_reads;
+}
+
+/* The post-warmup baseline for harness_concurrent.
+ *
+ * Each ingress thread snapshots ITS OWN counters, exactly as the phased
+ * harness does, because main reading a running thread's site would be a data
+ * race no seqlock covers -- these are plain per-thread counters, not published
+ * state.
+ *
+ * This does not perturb the conservation identity at the end of the test.
+ * total_tapped == arrivals_closed + discarded + residual is a statement about
+ * where ARRIVALS go, and a snapshot moves no arrival: it only READS
+ * site->tapped and site->enf.*, writing into storage that appears on neither
+ * side. Contrast g_st_thaw_discarded in the phased harness, which had to be
+ * added to both sides precisely because it is a drain that removes arrivals
+ * from the counter. A snapshot removes nothing, so it needs no matching term. */
+static _Atomic int g_h_snap_now;
+static _Atomic int g_h_snapped[HARNESS_INGRESS_THREADS];
+static harness_snap_t g_h_snap_pub[HARNESS_INGRESS_THREADS];
+
 static void *harness_ingress_main(void *arg) {
     harness_site_t *site = (harness_site_t *)arg;
+    /* Sites are elements of g_h_sites, which is what makes the index -- and
+     * therefore this thread's slot in the arrays above -- recoverable without
+     * changing the pthread entry signature. */
+    size_t idx = (size_t)(site - g_h_sites);
+    int snapped = 0;
 
     /* On the ingress thread, off the request path, per section 1.4: this warms
      * THIS thread's stream so an entropy failure aborts here rather than on an
@@ -346,6 +400,20 @@ static void *harness_ingress_main(void *arg) {
 
     while (!atomic_load_explicit(&g_h_stop, memory_order_acquire)) {
         int b;
+
+        /* Once, when the driver has confirmed a real publication. Checked per
+         * BATCH rather than per arrival so the arrival path itself is
+         * unchanged. Taking it late is safe and taking it early would not be:
+         * the window must begin after publication exists, or it would carry
+         * cold-start aged reads that are the design working rather than a
+         * lapse. */
+        if (!snapped &&
+            atomic_load_explicit(&g_h_snap_now, memory_order_acquire)) {
+            harness_snap_take(&g_h_snap_pub[idx], site);
+            snapped = 1;
+            atomic_store_explicit(&g_h_snapped[idx], 1, memory_order_release);
+        }
+
         for (b = 0; b < HARNESS_BATCH; ++b) {
             /* A fresh clock read per arrival, serving both the staleness check
              * and the bucket refill -- one read, two uses, per section 2. */
@@ -379,6 +447,11 @@ static int test_harness_concurrent(void) {
     memset(&g_h_counter, 0, sizeof(g_h_counter));
     memset(&g_h_epoch, 0, sizeof(g_h_epoch));
     atomic_store_explicit(&g_h_stop, 0, memory_order_release);
+    atomic_store_explicit(&g_h_snap_now, 0, memory_order_release);
+    memset(g_h_snap_pub, 0, sizeof(g_h_snap_pub));
+    for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
+        atomic_store_explicit(&g_h_snapped[i], 0, memory_order_release);
+    }
 
     for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
         memset(&g_h_sites[i], 0, sizeof(g_h_sites[i]));
@@ -427,6 +500,17 @@ static int test_harness_concurrent(void) {
      * many publications landing while many threads read the same line. This
      * window is worth about HARNESS_OVERLAP_EPOCHS more of them. */
     if (published) {
+        /* Open the post-warmup window HERE, on the same confirmation the test
+         * already performs, so everything measured after this point faces a
+         * plane that has actually published. */
+        atomic_store_explicit(&g_h_snap_now, 1, memory_order_release);
+        for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
+            while (atomic_load_explicit(&g_h_snapped[i],
+                                        memory_order_acquire) == 0) {
+                harness_sleep_ns(1000ULL * 1000ULL);
+            }
+        }
+
         harness_sleep_ns(ADCE_OBS_EPOCH_NS * HARNESS_OVERLAP_EPOCHS);
     }
 
@@ -541,21 +625,55 @@ static int test_harness_concurrent(void) {
          * every run for a reason that is the design working. */
         ADCE_TEST_ASSERT(aged > 0);
 
-        /* TORN and FUTURE are bounded, and this is the half the scaling
-         * argument does carry over unchanged: both require a concurrent
-         * publication, and a sequential thread can straddle at most one at a
-         * time, so each thread's count is bounded by the publications that
-         * actually occurred -- available exactly here, unlike in
-         * harness_stale_posture where it has to be derived from a window
-         * duration. The +1 covers a publication straddling the run's edge.
+        /* THE POST-WARMUP WINDOW. Everything above is an absolute total and
+         * therefore dominated by warmup; the deltas below start at the
+         * confirmed first publication, which is the window in which the
+         * phased harness's live-phase shape actually applies.
          *
-         * Per thread rather than aggregated, matching the shape
-         * harness_check_live_phase asserts, so a single pathological thread
-         * cannot hide inside three quiet ones. */
+         * Reading g_h_snap_pub and the site counters here is race-free:
+         * pthread_join above is the synchronisation edge, and each snapshot
+         * was written by the thread that owns the site it describes. */
         for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
-            ADCE_TEST_ASSERT(g_h_sites[i].enf.torn_reads +
-                             g_h_sites[i].enf.future_reads <=
-                             obs.ctx.publications + 1);
+            const harness_site_t *st = &g_h_sites[i];
+            uint64_t d_torn = st->enf.torn_reads - g_h_snap_pub[i].torn;
+            uint64_t d_future = st->enf.future_reads - g_h_snap_pub[i].future;
+            uint64_t d_aged = st->enf.aged_reads - g_h_snap_pub[i].aged;
+            uint64_t d_stale = st->enf.stale_reads - g_h_snap_pub[i].stale;
+            uint64_t d_tapped = st->tapped - g_h_snap_pub[i].tapped;
+
+            /* An empty window would satisfy both bounds vacuously. */
+            ADCE_TEST_ASSERT(d_tapped > 0);
+            ADCE_TEST_ASSERT(d_torn + d_future + d_aged == d_stale);
+
+            /* Publication-scaled, as before but now over a window where that
+             * is the only thing the count can be. */
+            ADCE_TEST_ASSERT(d_torn + d_future <= obs.ctx.publications + 1);
+
+            /* Arrival-scaled, and therefore zero: past the first publication
+             * there is no cold start left to explain an aged read, so one here
+             * means the observer went longer than ADCE_ADVICE_TIMEOUT_NS
+             * without publishing. Same bound as the phased harness's live
+             * phase, for the same reason, now that the window matches. */
+            if (d_aged != 0) {
+                fprintf(stderr,
+                        "FAIL: concurrent[%u] post-warmup aged=%llu"
+                        " (expected 0) torn=%llu future=%llu tapped=%llu"
+                        " -- publication lapsed past %llu ns\n",
+                        (unsigned)i, (unsigned long long)d_aged,
+                        (unsigned long long)d_torn,
+                        (unsigned long long)d_future,
+                        (unsigned long long)d_tapped,
+                        (unsigned long long)ADCE_ADVICE_TIMEOUT_NS);
+                return 1;
+            }
+
+            printf("  HARNESS concurrent[%u] post-warmup: torn=%llu"
+                   " future=%llu aged=%llu | stale=%llu tapped=%llu"
+                   " bound=%llu\n",
+                   (unsigned)i, (unsigned long long)d_torn,
+                   (unsigned long long)d_future, (unsigned long long)d_aged,
+                   (unsigned long long)d_stale, (unsigned long long)d_tapped,
+                   (unsigned long long)(obs.ctx.publications + 1));
         }
     }
 
@@ -653,21 +771,6 @@ enum {
     HARNESS_PH_COUNT
 };
 
-typedef struct {
-    uint64_t at_ns;
-    uint64_t tapped;
-    uint64_t admitted;
-    uint64_t shed;
-    uint64_t limit;
-    uint64_t stale;
-    /* The stale total split by route (section 4.1). Carried per phase because
-     * the routes have different bounds: torn and future are bounded by
-     * publications in the window, aged only by arrivals. */
-    uint64_t torn;
-    uint64_t future;
-    uint64_t aged;
-} harness_snap_t;
-
 /* Composition rather than extra fields on harness_site_t: the ordering cases
  * above share that type and have no phases. */
 typedef struct {
@@ -698,18 +801,6 @@ static _Atomic int g_st_ready;
  * harness_closer_main, so a plain counter suffices: written only by the
  * closer thread, read only after pthread_join(closer, ...) below. */
 static uint64_t g_st_thaw_discarded;
-
-static void harness_snap_take(harness_snap_t *snap, const harness_site_t *site) {
-    snap->at_ns = adce_now_ns();
-    snap->tapped = site->tapped;
-    snap->admitted = site->enf.admitted;
-    snap->shed = site->enf.dropped_shed;
-    snap->limit = site->enf.dropped_limit;
-    snap->stale = site->enf.stale_reads;
-    snap->torn = site->enf.torn_reads;
-    snap->future = site->enf.future_reads;
-    snap->aged = site->enf.aged_reads;
-}
 
 static uint64_t harness_permille(uint64_t part, uint64_t whole) {
     return whole == 0 ? 0 : (part * 1000ULL) / whole;
@@ -1078,12 +1169,20 @@ static int test_harness_stale_split_teeth(void) {
      * and band checks are satisfied throughout, so every verdict below is the
      * stale split's alone. */
     /* The cases below deliberately drive harness_check_live_phase to its
-     * failure path, which reports on stderr. Announcing that here keeps a
-     * GREEN run's output from reading as a red one -- same convention as the
-     * INVERTED line in harness_tap_after_gate. */
-    printf("  HARNESS teeth: the FAIL lines below are EXPECTED --"
-           " harness_check_live_phase is under test\n");
-    fflush(stdout);
+     * failure path, which reports on STDERR. The banner therefore goes to
+     * stderr too, and that is the whole point rather than a detail: stdout is
+     * block-buffered when the gate pipes it through tee while stderr is
+     * unbuffered, so a printf banner and an fprintf failure do not arrive in
+     * the order they were written -- the four expected FAIL lines surfaced at
+     * the top of the gate's output with their explanation forty lines below.
+     * One stream cannot reorder against itself. The fence is closed at the end
+     * so a reader knows exactly which lines are covered, instead of having to
+     * assume every FAIL after the banner is expected. */
+    fprintf(stderr,
+            "  HARNESS teeth BEGIN -- every FAIL line until 'teeth END' is"
+            " EXPECTED;\n"
+            "  harness_check_live_phase is the code under test here, not a"
+            " failing check.\n");
 
     memset(&ps, 0, sizeof(ps));
     ps.snap[phase].at_ns = 0;
@@ -1129,6 +1228,8 @@ static int test_harness_stale_split_teeth(void) {
     ps.snap[phase + 1].aged = 0;
     ps.snap[phase + 1].stale = 2;
     ADCE_TEST_ASSERT(harness_check_live_phase(&ps, phase, "teeth-identity") == 1);
+
+    fprintf(stderr, "  HARNESS teeth END -- expected failures above.\n");
 
     return 0;
 }

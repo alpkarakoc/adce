@@ -376,6 +376,25 @@ it.
   window duration: `torn + future <= publications + 1` per thread. Measured 4 aggregate under
   strict, 22 under TSan, bound 32. And `aged > 0` replaces a bare `stale > 0`, naming the
   cold-start posture as the thing that ran.
+
+  RESOLVED by matching the window rather than weakening the bound. `harness_concurrent` now takes
+  one `harness_snap_t` per site at the confirmed first publication -- each ingress thread
+  snapshotting its OWN site, since main reading a running thread's plain counters is a race no
+  seqlock covers -- and asserts the live-phase shape over the delta: `torn + future <=
+  publications + 1` and `aged == 0`. Measured: aged 0 on every thread and every profile, torn 0
+  under strict and 1-4 under TSan against a bound of 32.
+
+  The snapshot cannot perturb `total_tapped == arrivals_closed + discarded + residual`, and the
+  argument is structural, not empirical: that identity is about where ARRIVALS go, and a snapshot
+  moves no arrival -- it only READS the counters and writes storage on neither side. The contrast
+  worth keeping is `g_st_thaw_discarded`, which DID need a term on both sides because it is a
+  drain that removes arrivals. Read-only observers need no matching term; drains do.
+
+  Also fixed: the teeth banner now goes to STDERR, the same stream as the expected failures it
+  explains, with a BEGIN/END fence. stdout is block-buffered through the gate's `tee` while
+  stderr is unbuffered, so a printf banner and an fprintf failure did NOT arrive in written
+  order -- four expected FAIL lines surfaced at the top of the gate output with the explanation
+  forty lines below. One stream cannot reorder against itself.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
