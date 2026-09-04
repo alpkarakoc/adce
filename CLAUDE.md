@@ -340,3 +340,11 @@ it.
   crossings behaves differently there than anywhere else in its range. Flooring is
   uniform. This is a contract; changing it, or changing one function without the other,
   is an API decision.
+- Long-running measurement loops are launched with `nohup ... & disown` and write progress to
+  a file under the scratchpad. A scheduled check-in or a new turn can kill a job still
+  attached to the shell; this cost three restarts of one reproduction run. Poll the progress
+  file, never the process.
+- Long-running measurement loops are launched with `nohup ... & disown` and write progress to
+  a file under the scratchpad. A scheduled check-in or a new turn can kill a job still
+  attached to the shell; this cost three restarts of one reproduction run. Poll the progress
+  file, never the process.
