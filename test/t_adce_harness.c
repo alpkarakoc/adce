@@ -232,6 +232,21 @@ static int test_harness_tap_after_gate(void) {
         ingress_inverted(&site, now_ns);
     }
 
+    /* The report below carries the token VIOLATED, on stdout, which is the
+     * stream the gate tees and the one a reader skims for trouble. The verdict
+     * is deliberate -- the inverted call order is the code under test here --
+     * and this is the last place in the gate's output that prints a violation
+     * without saying so.
+     *
+     * Same fence as the teeth banner in test_harness_stale_split_teeth, and on
+     * stderr for the same reason it is: the two streams cannot be ordered
+     * against each other, so the note names the case instead of pointing at a
+     * neighbouring line. One line, not a BEGIN/END pair, because there is
+     * exactly one line to cover and nothing to bracket. */
+    fprintf(stderr,
+            "  HARNESS INVERTED -- the VIOLATED verdict this case reports is"
+            " EXPECTED; the inverted call order is the code under test.\n");
+
     harness_report("INVERTED", &site);
 
     /* The gate behaved identically: same admits, same drops. Nothing about the
