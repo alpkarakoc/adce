@@ -463,6 +463,15 @@ still-aged window contributes ~256 to a quantity bounded at ~31. A reported fail
 count measured against a publication-scaled bound, and a per-thread rather than global
 mechanism.
 
+**Attempted, and it did not reproduce.** 400 TSan executions of `harness_stale_posture` on
+the development machine, runner trimmed to that case, full output preserved on failure: **0
+failures**. Across the 1600 recovered-phase thread-samples the stale count peaked at 11
+against the bound of 31, and the **aged route was zero in every single sample** — the
+signature the diagnosis predicts was never once produced. That does not refute the reading of
+the bound above, which is a statement about what the derivation covers and stands on its own;
+it means this configuration does not reach the regime, and the budget was not extended to
+chase it.
+
 **This is a diagnosis of the bound, not yet a reproduction.** The route split now printed by
 the harness is what would settle it: torn and future belong under the publications bound,
 whereas any nonzero **aged** term in the recovered phase means the bound is being applied to a

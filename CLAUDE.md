@@ -333,6 +333,14 @@ it.
   the distinction is the point: the route split now printed by the harness is what would settle
   it, because a nonzero AGED term in the recovered phase is the signature and torn/future are
   not.
+
+  RUN, and it did not reproduce: 400 TSan executions, 0 failures, recovered stale peaking at 11
+  against the bound of 31 and **aged zero across all 1600 thread-samples**. The predicted
+  signature never appeared. Budget not extended. So the recovered bound is now the FOURTH
+  number in this project whose supporting event cannot be reproduced -- and unlike the earlier
+  three, the reading of WHY the bound is unsound does not depend on reproducing it, because it
+  follows from the derivation covering straddles only. Do not quote 261 as a rate; it is one
+  observation, the same error shape as 0.067 and 0.65%.
 - Still unverified, in descending order of how much each would change a decision.
   (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
   every race result in this project is Clang's. (2) The Darwin half of
