@@ -112,6 +112,17 @@ first version of this table used and it is 4.4% low at `g*` — 7.7 epochs again
 it is safe. The error is negligible in the first two rows and is not in the row that
 matters.
 
+This is a DIFFERENT ERROR CLASS from the four corrections recorded in CLAUDE.md, and
+conflating them would misplace where the discipline needs to be applied. `0.067`, the
+`0.65%`, `recovered=261` and the `~87%` were single observations used as measurements —
+a methodology fault, where the defect is in what was treated as evidence and no amount of
+rechecking the arithmetic would have found it. This was a unit conversion inside a
+derivation that is otherwise correct and independently recomputable: the fixed point, `g*`
+and `sup z` all stand unchanged, and anyone can recompute the column from the formula now
+printed beside it. The first class is caught by refusing to quote an observation as a rate;
+the second by showing the conversion. Both are worth catching, and the remedies do not
+transfer.
+
 Two derived numbers fall out, neither of which is written down anywhere in this repository:
 
 - **`g* ≈ 8.98% per epoch` is the alarm threshold for exponential growth.** Any ramp

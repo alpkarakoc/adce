@@ -533,25 +533,7 @@ looking.
   below because it is the only entry here where a whole code path is unexecuted by any
   automated gate.
 
-  **(3) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
-  so every race result in this project is Clang's. DEMOTED from (1), and the demotion rests
-  on a verified fact rather than on a preference: GCC does not implement its own race
-  detector, it VENDORS LLVM's. Checked rather than assumed, against the same `gcc:14` image
-  the gate uses — `gcc -print-file-name=libtsan.so` is built from
-  `/usr/src/gcc/libsanitizer/tsan/tsan_rtl*.cpp` and `libsanitizer/sanitizer_common/*`,
-  which are LLVM compiler-rt's own filenames compiled in verbatim as source paths, and the
-  runtime announces `Running under ThreadSanitizer v3`, the same version string LLVM emits.
-  Same shadow memory, same happens-before engine, same report path.
-
-  So running it would add a second FRONT END over near-identical detection, not an
-  independent instrument, and the marginal evidence is a GCC codegen difference rather than
-  a second opinion on the memory model. Worth having, worth little. The sharper point is
-  that it could not have caught the only timing bug this project has ever found: run
-  33748342781 was a phase-accounting race, which is a LOGICAL race, and no ThreadSanitizer
-  of any vendor can see one — it appeared in the strict `-O2` profile, and ASan and TSan
-  dilate execution enough to mask that class.
-
-  **(4) Per-arrival latency under CONTENTION.** §5 of `docs/enforcement-plane.md` now
+  **(3) Per-arrival latency under CONTENTION.** §5 of `docs/enforcement-plane.md` now
   carries the measurement — both architectures, per outcome, with the method — so the
   gate's cost is no longer an open question. What is still open is that every one of those
   figures comes from a fixture with no concurrent publication: `adce_epoch_read` never
@@ -561,6 +543,29 @@ looking.
   every ingress thread, and its contended cost has never been measured either. It is
   plausibly larger than the gate and the clock combined, and it is the term that decides
   whether any offered rate derived from `gate + clock` is actually achievable.
+
+  **(4) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
+  so every race result in this project is Clang's. It was (1) and is now LAST, and the move
+  is the list's own ordering principle applied rather than a change of taste: entries rank
+  by how much running them would change a decision, and once the instrument is known to be
+  near-identical to one already in the matrix, it changes less than the untimed seqlock
+  retry path above it does.
+
+  The demotion rests on a verified fact. GCC does not implement its own race detector, it
+  VENDORS LLVM's — checked rather than assumed, against the same `gcc:14` image the gate
+  uses. `gcc -print-file-name=libtsan.so` is built from
+  `/usr/src/gcc/libsanitizer/tsan/tsan_rtl*.cpp` and `libsanitizer/sanitizer_common/*`,
+  which are LLVM compiler-rt's own filenames compiled in verbatim as source paths, and the
+  runtime announces `Running under ThreadSanitizer v3` — the same version string LLVM's
+  compiler-rt emits. Same shadow memory, same happens-before engine, same report path.
+
+  So running it would add a second FRONT END over near-identical detection, not an
+  independent instrument, and the marginal evidence is a GCC codegen difference rather than
+  a second opinion on the memory model. Worth having, worth little. The sharper point is
+  that it could not have caught the only timing bug this project has ever found: run
+  33748342781 was a phase-accounting race, which is a LOGICAL race, and no ThreadSanitizer
+  of any vendor can see one — it appeared in the strict `-O2` profile, and ASan and TSan
+  dilate execution enough to mask that class.
 
   Separately, and by design rather than by omission: the `abort()` in `adce_rng_seed` has
   never executed, and cannot without fault injection.
