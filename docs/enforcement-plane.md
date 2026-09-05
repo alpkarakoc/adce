@@ -716,7 +716,8 @@ function takes the draw as a parameter:
   EXTERNAL loop through a retrying or backing-off client needs a client model this
   repository does not have and can only be measured. It also derives two numbers
   §1.2 states qualitatively: an exponential ramp alarms only above ~8.98% growth per
-  epoch, and no exponential ramp at any rate can saturate the squash while N < 125.
+  epoch (doubling faster than ~81 ms), and no exponential ramp at any rate can saturate the
+  squash while N < 125.
 - Observer death mid-flight: the watchdog trips, the fallback engages, and the system does
   not fail open.
 - Multi-thread bucket behaviour and the `threads × rate` aggregate ceiling.

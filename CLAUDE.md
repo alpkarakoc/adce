@@ -15,7 +15,12 @@ publication path.
 The codebase is no longer a single header. `adce_platform.h` remains header-only — every
 platform primitive, the Q16 lane, the RNG and the seqlock are `static inline` in it — but
 the Observation Plane has an out-of-line producer, so `src/` exists and both gates compile
-it.
+it. The Enforcement Plane has NO out-of-line surface, and its absence from `src/` is a
+resolved decision rather than a gap: `adce_enf_admit` is inline, so it draws from the
+CALLING translation unit's `adce_rng_tls`, and an out-of-line `adce_enf_thread_init` would
+warm a different stream than the one the gate draws from — silently. The reasoning is in
+`docs/enforcement-plane.md` §6; a reader looking for `src/adce_enforce.c` should stop
+looking.
 
 - `include/adce_platform.h` — header-only platform layer, built on C11 `stdatomic.h`
   acquire/release. No mutexes, no spinlocks, no allocation.
@@ -34,6 +39,38 @@ it.
 - `test/t_adce_observe.c` — Observation Plane cases. Each is `static`, so the gate's
   ran-tests guard finds it by source pattern, and each has one external forwarder that the
   runner table in `t_adce_platform.c` registers.
+- `include/adce_obs_thread.h` / `src/adce_obs_thread.c` — the SCHEDULING half of the
+  Observation Plane, and optional by construction: a consumer that owns its own cadence
+  drives `adce_obs_epoch_close` directly and never links this TU. It makes not one
+  statistical decision. It lives in the library rather than in a test so that consumers do
+  not each reimplement epoch cadence and writer ownership, which would retire the
+  `T <= ADCE_ADVICE_TIMEOUT_NS / 2` `_Static_assert` that currently locks the invariant.
+- `include/adce_enforce.h` — the ENTIRE Enforcement Plane, inline, with no `.c` file: the
+  outcome enum, `adce_enf_ctx_t`, the deployment tuning block, `adce_enf_should_shed`,
+  `adce_enf_classify_stale`, `adce_enf_decide`, `adce_enf_admit`, `adce_enf_thread_init`.
+  Integer arithmetic only — no `double` and no `adce_rng_next_unit` — per the lane
+  convention in `adce_platform.h`. Every function that must be reachable from a test takes
+  its nondeterminism as a PARAMETER: `now_ns` and the RNG `draw`. That is structural, not
+  stylistic, and the reason is in the plane doc: `adce_rng_tls` is `static _Thread_local`
+  at file scope, so a test TU cannot observe or seed the stream an enforcement TU draws
+  from.
+- `test/t_adce_enforce.c` — Enforcement Plane unit cases: the exhaustive shed mapping,
+  monotonicity, the read clamp, the stale fallback and its three routes, cold start, the
+  bucket ceiling, and determinism.
+- `test/t_adce_harness.c` — the INTEGRATION harness, and the only file here that tests a
+  CALL ORDER rather than a function. It builds an instrumented ingress site in both the
+  correct and the inverted orderings, because a harness that only ever runs the correct one
+  proves nothing about ordering; it also owns the concurrent case, the fail-closed stale
+  posture with its own gated epoch closer, and the deterministic teeth for the stale route
+  split.
+- `test/t_adce_latency.c` — per-arrival cost, MEASURED and never asserted. A latency
+  threshold on a shared runner is a flake generator and this case runs in the per-edit
+  gate, so its only assertions are structural: that each fixture drove the outcome it
+  claims.
+- `docs/` — three design documents, written before the code they describe and cited
+  throughout the decisions below: `observation-plane.md`, `enforcement-plane.md`, and
+  `closed-loop-harness.md`. The third describes a harness that does not exist yet; see the
+  unverified list.
 
 ## Locked decisions — do not change without stating a reason
 
@@ -63,6 +100,27 @@ it.
 - `scripts/verify.sh` and the files under `scripts/hooks/` are the verification gate.
   Never modify them in the same commit as the code they check. A gate change is proposed
   first, with its reason, and lands in its own commit.
+- Landing on `main` is ENFORCED, not conventional. A GitHub ruleset (`main`, id 22339037,
+  `enforcement: active`) requires a pull request and three passing status checks —
+  `sanitizers (ubuntu-24.04)`, `sanitizers (ubuntu-24.04-arm)` and `shipping-target`, which
+  is every job `.github/workflows/verify.yml` defines, so nothing in the workflow is
+  optional. `bypass_actors` is EMPTY: the repository owner is not exempt. It also forbids
+  force-pushes (`non_fast_forward`) and branch deletion. A direct push to `main` is rejected
+  with GH013.
+
+  Three details recorded because getting any of them wrong would misdescribe the control.
+  It is a RULESET, not classic branch protection: `GET /repos/.../branches/main/protection`
+  returns 404 "Branch not protected", and reading that as "unprotected" would be exactly
+  backwards — the rules live under `/repos/.../rules/branches/main`, and GH013 is the
+  ruleset violation code rather than the classic one. `required_approving_review_count` is
+  **0**, so what is enforced is the PR PATH and the checks, not human review; a solo author
+  can still self-merge, and this control is not a reviewer. And
+  `strict_required_status_checks_policy` is false, so a PR may merge on checks that ran
+  against a branch behind `main`.
+
+  This did not replace a written convention — there was none. Every change since #1 has
+  landed by PR as an unwritten practice; what changed is that the practice is now
+  enforced by the server instead of by whoever is at the keyboard.
 - `adce_rng_seed` calls `abort()` when the entropy draw fails. A PRNG seeded from a
   failed or partial draw is predictable and every downstream containment decision
   inherits that, so there is deliberately no degraded seeding path.
@@ -395,21 +453,117 @@ it.
   stderr is unbuffered, so a printf banner and an fprintf failure did NOT arrive in written
   order -- four expected FAIL lines surfaced at the top of the gate output with the explanation
   forty lines below. One stream cannot reorder against itself.
-- Still unverified, in descending order of how much each would change a decision.
-  (1) GCC's TSan runs nowhere; the GCC profile above is ASan+UBSan only, deliberately, so
-  every race result in this project is Clang's. (2) The Darwin half of
-  `adce_platform_get_entropy` — the `getentropy` chunking loop — has no automated coverage
-  at all: CI is Linux-only and takes the `getrandom` branch, so that code runs only on the
-  development machine. No CI job runs macOS, which is the platform the per-edit gate runs
-  on. (3) Closed-loop behaviour — oscillation, settling, limit cycles — has no load model
-  and no evidence in either direction. (4) Per-arrival latency under CONTENTION.
-  §5 of `docs/enforcement-plane.md` now carries the measurement — both architectures, per
-  outcome, with the method — so the gate's cost is no longer an open question. What is
-  still open is that every one of those figures comes from a fixture with no concurrent
-  publication: `adce_epoch_read` never retried, so the seqlock's retry path has never been
-  timed and §2's estimate of those odds remains analytic. Separately, and by
-  design rather than by omission: the `abort()` in `adce_rng_seed` has never executed, and
-  cannot without fault injection.
+- **The z-score detector is a FAST-TRANSIENT detector only, and the token bucket is the
+  sole defence against sustained or slowly-growing load.** This is a statement about what
+  the Enforcement Plane actually contains, and it is stronger than the qualitative version
+  in `docs/enforcement-plane.md` §1.2. Two results from `docs/closed-loop-harness.md`
+  compose into it:
+
+  A sustained STEP becomes invisible. The EWMA re-baselines onto the new rate within
+  roughly N epochs, `d` returns to zero, and pressure returns to `ADCE_PRESSURE_MIN` — so a
+  permanent tenfold overload alarms briefly and is then, correctly by the statistic's own
+  definition, no longer an anomaly.
+
+  A geometric RAMP need not alarm at all. On a ramp the EWMA reaches a steady solution in
+  which `z` is constant and INDEPENDENT of the absolute rate, so the detector is
+  scale-invariant and volume climbs without bound while `z` sits still. Solving that fixed
+  point at N = 100 puts the alarm threshold at `g* ≈ 8.98%` growth per epoch: anything
+  doubling more slowly than every ~8.1 epochs — **~81 ms** — passes the detector entirely,
+  at any amplitude, forever.
+
+  Neither is a defect and neither is fixable by tuning; both follow from `pressure` being a
+  z-score, which is a RELATIVE measure. What follows for the design is the load-bearing
+  part: outside a window of roughly N epochs after a fast change, `ADCE_ENF_RATE_Q16_PER_NS`
+  and `ADCE_ENF_CAPACITY_Q16` are the only thing standing between the system and unbounded
+  volume. §1.2's insistence that the bucket's rate must NOT be a function of pressure is
+  therefore not a defensive nicety — it is the whole of the protection in the regime that
+  matters most.
+
+- **`ADCE_OBS_WINDOW_N` must stay below 125, and no test enforces it.** A live constraint on
+  a tuning constant that reads as free.
+
+  `sup z` over all geometric ramps is `1/sqrt((1-alpha)*alpha)`, which is 7.178 at N = 100 —
+  BELOW `ADCE_OBS_Z_HI` of 8. So at the current tuning no exponential ramp at any growth
+  rate can saturate the squash; the steepest conceivable one caps pressure at 0.836 of
+  maximum. That bound rises with N and crosses `z_hi` at **N = 125**, past which a
+  sufficiently steep ramp reaches full containment. Raising N would therefore change a
+  qualitative property of the system, not merely its smoothing.
+
+  The exact crossover depends on which variance recurrence is used, so it was read out of
+  the code rather than assumed. `src/adce_observe.c` computes
+  `var = (1-alpha) * (var + alpha*d*d)`, with the `(1-alpha)` multiplying the whole bracket;
+  that gives `sup z = 1/sqrt((1-alpha)*alpha)` and a crossover at 125. The other common form,
+  `var = (1-alpha)*var + alpha*d*d`, gives `1/sqrt(alpha)` and a crossover at exactly 127.
+  **125 is the number for this codebase**; 127 belongs to a recurrence it does not use, and
+  quoting it would be off by two in the permissive direction.
+
+  Nothing checks this. `adce_observe.h` already carries `_Static_assert`s for the cadence
+  invariant and for `z_hi > z_lo`, so the mechanism exists and this constraint is simply not
+  expressed in it. Adding one is a code change and belongs in its own step.
+
+- Still unverified, in descending order of how much each would change a decision. The
+  order changed on 2026-09-05; the reasons are stated per entry rather than left implicit,
+  because the previous order put the cheapest gap first.
+
+  **(1) Closed-loop behaviour — oscillation, settling, limit cycles.** Promoted to the top:
+  it is a central claim of the design rather than a coverage gap, and if the two-stage
+  defence oscillates instead of settling, the library does not do the job it exists for.
+  Nothing else on this list can invalidate the product.
+
+  The state is now MODEL DESIGNED, NEVER RUN, which is not the same as the "no load model
+  and no evidence" this entry used to say — and the difference matters in exactly one
+  direction, because this project's standard is that written is not run.
+  `docs/closed-loop-harness.md` specifies the load patterns, the settle observable, the
+  determinism strategy and the first six assertions. Not one line of it has executed.
+  `test/t_adce_loop.c` does not exist. So the evidence in either direction is still ZERO,
+  and a design document must not be mistaken for a result: what changed is that the
+  experiment is now specified, not that it was performed.
+
+  Two things in that document are worth reading before anyone builds it. The primary
+  assertion needs no band and no timing — with the tap before the gate the counter is a
+  function of the offered sequence alone, so the published pressure trajectory must be
+  bit-identical across two different draw streams, and the inverted ordering must diverge.
+  And the settle BAND is deliberately not assertable; §5 there states what a measurement
+  would have to show first.
+
+  **(2) The Darwin half of `adce_platform_get_entropy`** — the `getentropy` chunking loop —
+  has no automated coverage at all: CI is Linux-only and takes the `getrandom` branch, so
+  that code runs only on the development machine. No CI job runs macOS, which is the
+  platform the per-edit gate runs on. Unchanged in position, and it stays above the two
+  below because it is the only entry here where a whole code path is unexecuted by any
+  automated gate.
+
+  **(3) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
+  so every race result in this project is Clang's. DEMOTED from (1), and the demotion rests
+  on a verified fact rather than on a preference: GCC does not implement its own race
+  detector, it VENDORS LLVM's. Checked rather than assumed, against the same `gcc:14` image
+  the gate uses — `gcc -print-file-name=libtsan.so` is built from
+  `/usr/src/gcc/libsanitizer/tsan/tsan_rtl*.cpp` and `libsanitizer/sanitizer_common/*`,
+  which are LLVM compiler-rt's own filenames compiled in verbatim as source paths, and the
+  runtime announces `Running under ThreadSanitizer v3`, the same version string LLVM emits.
+  Same shadow memory, same happens-before engine, same report path.
+
+  So running it would add a second FRONT END over near-identical detection, not an
+  independent instrument, and the marginal evidence is a GCC codegen difference rather than
+  a second opinion on the memory model. Worth having, worth little. The sharper point is
+  that it could not have caught the only timing bug this project has ever found: run
+  33748342781 was a phase-accounting race, which is a LOGICAL race, and no ThreadSanitizer
+  of any vendor can see one — it appeared in the strict `-O2` profile, and ASan and TSan
+  dilate execution enough to mask that class.
+
+  **(4) Per-arrival latency under CONTENTION.** §5 of `docs/enforcement-plane.md` now
+  carries the measurement — both architectures, per outcome, with the method — so the
+  gate's cost is no longer an open question. What is still open is that every one of those
+  figures comes from a fixture with no concurrent publication: `adce_epoch_read` never
+  retried, so the seqlock's retry path has never been timed and §2's estimate of those odds
+  remains analytic. A second unmeasured term sits beside it and was surfaced by the
+  closed-loop design: `adce_obs_tap` is a relaxed `fetch_add` on ONE cache line shared by
+  every ingress thread, and its contended cost has never been measured either. It is
+  plausibly larger than the gate and the clock combined, and it is the term that decides
+  whether any offered rate derived from `gate + clock` is actually achievable.
+
+  Separately, and by design rather than by omission: the `abort()` in `adce_rng_seed` has
+  never executed, and cannot without fault injection.
 - `adce_q16_div` with a zero divisor saturates toward the numerator's sign: negative
   numerator yields `ADCE_Q16_MIN`, zero or positive yields `ADCE_Q16_MAX`. A collapsed
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
@@ -434,10 +588,6 @@ it.
   crossings behaves differently there than anywhere else in its range. Flooring is
   uniform. This is a contract; changing it, or changing one function without the other,
   is an API decision.
-- Long-running measurement loops are launched with `nohup ... & disown` and write progress to
-  a file under the scratchpad. A scheduled check-in or a new turn can kill a job still
-  attached to the shell; this cost three restarts of one reproduction run. Poll the progress
-  file, never the process.
 - Long-running measurement loops are launched with `nohup ... & disown` and write progress to
   a file under the scratchpad. A scheduled check-in or a new turn can kill a job still
   attached to the shell; this cost three restarts of one reproduction run. Poll the progress

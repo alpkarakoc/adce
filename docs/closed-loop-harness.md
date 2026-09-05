@@ -98,18 +98,24 @@ the detector is scale-invariant, which is exactly why volume can climb without b
 
 | g (per epoch) | doubling time | z | pressure |
 |---|---|---|---|
-| 0.001 | 693 epochs (6.9 s) | 1.06 | 0 |
-| 0.01 | 69 epochs (0.69 s) | 1.42 | 0 |
-| 0.02 | 35 epochs (0.35 s) | 1.73 | 0 |
-| 0.05 | 14 epochs (0.14 s) | 2.39 | 0 |
-| **0.0898** | **7.7 epochs (77 ms)** | **3.00** | **0 — at the threshold** |
-| 0.2 | 3.5 epochs | 4.06 | 0.21 |
+| 0.001 | 693.5 epochs (6.9 s) | 1.06 | 0 |
+| 0.01 | 69.7 epochs (0.70 s) | 1.42 | 0 |
+| 0.02 | 35.0 epochs (0.35 s) | 1.73 | 0 |
+| 0.05 | 14.2 epochs (0.14 s) | 2.39 | 0 |
+| **0.0898** | **8.06 epochs (81 ms)** | **3.00** | **0 — at the threshold** |
+| 0.2 | 3.8 epochs | 4.06 | 0.21 |
 | g → ∞ | — | **7.178** | **0.836** |
+
+Doubling times are `ln2 / ln(1+g)`, not `ln2 / g`. The small-`g` approximation is what the
+first version of this table used and it is 4.4% low at `g*` — 7.7 epochs against the true
+8.06 — which is the wrong direction, since it overstates how fast a ramp must climb before
+it is safe. The error is negligible in the first two rows and is not in the row that
+matters.
 
 Two derived numbers fall out, neither of which is written down anywhere in this repository:
 
 - **`g* ≈ 8.98% per epoch` is the alarm threshold for exponential growth.** Any ramp
-  doubling more slowly than every 7.7 epochs — 77 ms — passes the detector entirely, at any
+  doubling more slowly than every 8.06 epochs — 81 ms — passes the detector entirely, at any
   amplitude, forever. That is §1.2's claim as a number.
 - **`sup z = 1/sqrt((1-a)a) = 7.178 < z_hi = 8`, so a geometric ramp can never saturate the
   squash at all.** The steepest conceivable exponential ramp caps pressure at 0.836 of
@@ -117,6 +123,12 @@ Two derived numbers fall out, neither of which is written down anywhere in this 
   `z_hi` at **N = 125**. A future retune of N past 125 silently changes whether a ramp can
   ever reach full containment. Recorded here because it is invisible at the call site and
   no test would catch it.
+
+  The crossover depends on which variance recurrence is used, so it was read out of the
+  code rather than assumed. `src/adce_observe.c` computes `var = (1-a)*(var + a*d*d)`, with
+  the `(1-a)` outside the bracket, giving `sup z = 1/sqrt((1-a)a)` and 125. The other
+  common form, `var = (1-a)*var + a*d*d`, gives `1/sqrt(a)` and exactly 127. 125 is this
+  codebase's number; 127 would be off by two in the permissive direction.
 
 *Shows:* pressure pinned at `ADCE_PRESSURE_MIN` while offered volume grows by two orders of
 magnitude, and the token bucket holding the ceiling alone throughout.
