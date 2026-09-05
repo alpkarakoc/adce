@@ -158,7 +158,12 @@ Requires an integration harness, proposed as its own step:
 
 - That the tap actually precedes the gate. This is a property of the call site, not of any
   function; no unit test can assert it.
-- Oscillation and limit-cycle behaviour under closed-loop traffic.
+- Oscillation and limit-cycle behaviour under closed-loop traffic. **Designed in
+  `docs/closed-loop-harness.md`; still unmeasured.** The ordering claim in section 2
+  above has executable evidence (`test_harness_tap_before_gate` and its inverted
+  counterpart); the DYNAMICS half of that section -- "limit-cycle oscillation rather
+  than settling" -- has none in either direction, and that document says which part
+  of it can be asserted and which can only be measured.
 - Timer jitter and epoch drift under load; whether the watchdog trips under real scheduling.
 - Fail-closed behaviour when the observer thread dies mid-flight.
 
