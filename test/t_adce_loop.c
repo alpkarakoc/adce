@@ -1437,6 +1437,315 @@ static int test_loop_ramp_teeth(void) {
 }
 
 /* =====================================================================
+ * Confronting the TOKEN BUCKET's closed form with the code. REPORT ONLY.
+ *
+ * CLAUDE.md's strongest architectural claim is that outside a window of
+ * roughly N epochs after a fast change, the bucket is the ONLY thing standing
+ * between the system and unbounded volume. That claim is currently evidenced
+ * as a side effect of test_harness_concurrent, whose ceiling assertion is
+ * ONE-SIDED (admitted <= ceiling) and whose load scheduling pushes admitted
+ * away from the threshold rather than toward it. Nothing shows the ceiling
+ * binds TIGHTLY.
+ *
+ * The tight direction cannot be an inequality without inventing a band, which
+ * is the underived-number problem this project has recorded five times. But
+ * with pressure pinned and the draws irrelevant the bucket is deterministic,
+ * so admitted is EXACTLY computable, and an equality needs no band at all.
+ * This case confronts that closed form with the code before anything asserts
+ * it -- the same order as the section 2B step.
+ *
+ * NOTHING BELOW IS ASSERTED beyond the structural guards that say the fixture
+ * drove what it claims.
+ *
+ * ---------------------------------------------------------------------
+ * THE DERIVATION
+ *
+ * Setup: pressure pinned at ADCE_PRESSURE_MIN with the epoch kept FRESH, so
+ * adce_enf_should_shed is (draw >> 48) < 0, false for every draw. Every
+ * arrival reaches stage two and the bucket is the only limiter.
+ *
+ * Write R = ADCE_ENF_RATE_Q16_PER_NS, K = ADCE_ENF_COST_Q16,
+ * C = ADCE_ENF_CAPACITY_Q16, and let arrival i land at t_i with the bucket
+ * holding tau_i afterwards. adce_enf_decide does, per arrival:
+ *
+ *     delta_i = t_i - t_{i-1}                 (clamped to 0 if not positive)
+ *     U_i     = min(tau_{i-1} + R*delta_i, C)
+ *     admit iff U_i >= K, then tau_i = U_i - K, else tau_i = U_i
+ *
+ * Let L_i = (tau_{i-1} + R*delta_i) - U_i >= 0 be what the cap discarded, and
+ * L = sum L_i. Summing the update over all M arrivals telescopes to
+ *
+ *     tau_{M-1} = tau_{-1} + R * sum(delta_i) - L - K*A
+ *
+ * with A the admitted count. Two substitutions close it. tau_{-1} = C, since
+ * adce_enf_thread_init starts the bucket full. And sum(delta_i) is exactly
+ * t_{M-1} - t_start, because last_refill_ns is advanced to now_ns on EVERY
+ * arrival that reaches stage two, DROPPED ONES INCLUDED. That is the
+ * load-bearing detail rather than an incidental one: if the code advanced
+ * last_refill only on admission, the sum would not telescope and no closed
+ * form of this shape would exist.
+ *
+ *     K*A = C + R*(t_last - t_start) - L - tau_final
+ *
+Rearranged, A = (C + R*span - (L + tau_final)) / K, so the closed form
+ *
+ *     A = floor( (C + R*(t_last - t_start)) / K )
+ *
+ * holds if and only if the whole leftover fits in one cost:
+ *
+ *     (*)   0 <= L + tau_final < K
+ *
+ * NOT "L = 0 and tau_final < K". An earlier version of this derivation stated
+ * it that way and the measurement refuted it immediately: L IS NONZERO in
+ * every run, necessarily, because adce_enf_thread_init starts the bucket FULL
+ * at t_start and the first arrival therefore refills into a bucket already at
+ * capacity. That first clamp discards exactly R*delta_0 and nothing can avoid
+ * it. In the synthetic arm below, delta_0 = 1000 ns and the conservation
+ * identity closes with L = 7000 = R*delta_0 exactly.
+ *
+ * So L is not an error term to be bounded away, it is a DERIVED quantity:
+ *
+ *     L = R*delta_0  +  (whatever a later refill past C discarded)
+ *
+ * and the second term is zero unless some inter-arrival gap is long enough to
+ * refill from the starved regime back to capacity, which needs C/R = 38.3 ms.
+ * That is the residual the equality has to live with, and it has a derivation
+ * rather than merely being small.
+ *
+Gaps under K/R = 9362 ns are SUFFICIENT to keep tau_final < K but are not
+ * necessary: a real-clock arm that exceeded that gap 11 times still satisfied
+ * the equality exactly, because what matters is where tau happened to be when
+ * the long gap landed, not the gap alone.
+ *
+ * ---------------------------------------------------------------------
+ * WHICH FORM IS ASSERTABLE, WHICH IS FLAKY
+ *
+ * The floor form above is the obvious equality and it is NOT the one to
+ * assert. Condition (*) needs L + tau_final < K, and tau_final is effectively
+ * uniform over [0, K) from one run to the next, so the floor form fails
+ * whenever tau_final lands in [K - L, K) -- with probability about L/K. On the
+ * real clock L = R*delta_0 is a few hundred, giving a failure rate on the
+ * order of half a percent. MEASURED: over 400 real-clock runs the floor form
+ * mismatched 5 times. (5/400 is one campaign, consistent in order of magnitude
+ * with L/K; it is not quoted as a rate.)
+ *
+ * The CONSERVATION form has no such condition, because it never divides:
+ *
+ *     K*A  ==  C + R*(t_last - t_start)  -  R*delta_0  -  tau_final
+ *
+ * substituting the derived L = R*delta_0. Every term is exactly observable --
+ * A, tau_final from the ctx, the timestamps from the schedule -- there is no
+ * floor to lose a remainder in, and no leftover condition to satisfy. Over the
+ * same 400 runs it mismatched ZERO times. That is the equality a later step
+ * should assert; the floor form would have been the sixth underived number in
+ * this project, arrived at by a different route.
+ *
+ * Sustained overload means an offered rate above R/K = 106,812 arrivals/s.
+ * Everything here is exact integer arithmetic; no floating point enters.
+ * ===================================================================== */
+
+typedef struct {
+    uint64_t arrivals;
+    uint64_t admitted;
+    uint64_t predicted;
+    uint64_t dropped_shed;
+    uint64_t dropped_limit;
+    uint64_t stale_reads;
+    uint64_t t_start;
+    uint64_t t_last;
+    uint64_t tokens_final;
+    uint64_t max_gap_ns;
+    uint64_t first_gap_ns;
+    uint64_t gaps_over_cost;
+    uint64_t gaps_over_capacity;
+    uint64_t republishes;
+} loop_bucket_out_t;
+
+static uint64_t loop_bucket_predict(uint64_t t_start, uint64_t t_last) {
+    return ((uint64_t)ADCE_ENF_CAPACITY_Q16 +
+            ADCE_ENF_RATE_Q16_PER_NS * (t_last - t_start)) /
+           ADCE_ENF_COST_Q16;
+}
+
+/* ONE body for both arms, differing only in where now_ns comes from. That is
+ * deliberate: if the two arms diverge, the clock is the only thing that can
+ * have caused it. */
+static int loop_bucket_run(int real_clock, uint64_t arrivals, uint64_t step_ns,
+                           loop_bucket_out_t *out) {
+    static adce_epoch_state_t epoch;
+    static adce_enf_ctx_t enf;
+    loop_draws_t draws;
+    uint64_t t0;
+    uint64_t prev;
+    uint64_t last_pub;
+    uint64_t epoch_id = 1;
+    uint64_t i;
+
+    memset(out, 0, sizeof(*out));
+    memset(&epoch, 0, sizeof(epoch));
+    draws.s = 0x5772F1CBu;
+
+    t0 = real_clock ? adce_now_ns() : (uint64_t)1000000000;
+
+    /* Pressure pinned at the floor, published BEFORE the first arrival so the
+     * very first read is fresh rather than cold-start aged. */
+    adce_epoch_publish(&epoch, ADCE_PRESSURE_MIN, epoch_id, t0);
+    last_pub = t0;
+
+    adce_enf_thread_init(&enf, &epoch, t0);
+
+    out->t_start = t0;
+    prev = t0;
+
+    for (i = 0; i < arrivals; i++) {
+        uint64_t now = real_clock ? adce_now_ns() : t0 + (i + 1u) * step_ns;
+        uint64_t gap = now > prev ? now - prev : 0u;
+
+        if (i == 0u) {
+            out->first_gap_ns = gap;
+        }
+        if (gap > out->max_gap_ns) {
+            out->max_gap_ns = gap;
+        }
+        if (gap >= (uint64_t)ADCE_ENF_COST_Q16 / ADCE_ENF_RATE_Q16_PER_NS) {
+            out->gaps_over_cost++;
+        }
+        if (gap >= (uint64_t)ADCE_ENF_CAPACITY_Q16 / ADCE_ENF_RATE_Q16_PER_NS) {
+            out->gaps_over_capacity++;
+        }
+
+        /* Keep the epoch fresh on a TIME basis rather than an arrival count,
+         * because the two arms advance time at wildly different rates and a
+         * fixed count would go stale in one of them. A stale read would
+         * substitute ADCE_ENF_STALE_PRESSURE and start shedding, which
+         * silently voids the derivation's premise. */
+        if (now - last_pub > ADCE_ADVICE_TIMEOUT_NS / 4u) {
+            epoch_id++;
+            adce_epoch_publish(&epoch, ADCE_PRESSURE_MIN, epoch_id, now);
+            last_pub = now;
+            out->republishes++;
+        }
+
+        /* A VARYING draw, not a fixed one. With pressure at the floor the shed
+         * comparison is false for every draw, so varying it is the cheapest
+         * demonstration that the result is draw-independent rather than an
+         * artefact of one convenient value. */
+        (void)adce_enf_decide(&enf, now, loop_draw_next(&draws));
+
+        prev = now;
+        out->t_last = now;
+    }
+
+    out->arrivals = arrivals;
+    out->admitted = enf.admitted;
+    out->dropped_shed = enf.dropped_shed;
+    out->dropped_limit = enf.dropped_limit;
+    out->stale_reads = enf.stale_reads;
+    out->tokens_final = enf.tokens_q16;
+    out->predicted = loop_bucket_predict(out->t_start, out->t_last);
+
+    return 0;
+}
+
+static void loop_bucket_report(const char *label,
+                               const loop_bucket_out_t *o) {
+    uint64_t span = o->t_last - o->t_start;
+    long long err = (long long)o->admitted - (long long)o->predicted;
+    /* L, read out of the conservation identity rather than instrumented into
+     * the library: L = C + R*span - K*A - tau_final. */
+    uint64_t supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 +
+                      ADCE_ENF_RATE_Q16_PER_NS * span;
+    uint64_t clamped = supply - (uint64_t)ADCE_ENF_COST_Q16 * o->admitted -
+                       o->tokens_final;
+    uint64_t predicted_clamp = ADCE_ENF_RATE_Q16_PER_NS * o->first_gap_ns;
+    uint64_t leftover = clamped + o->tokens_final;
+
+    printf("    %s arrivals=%llu span=%.3fms admitted=%llu predicted=%llu"
+           " err=%+lld (%.3e rel)\n",
+           label, (unsigned long long)o->arrivals, (double)span / 1e6,
+           (unsigned long long)o->admitted, (unsigned long long)o->predicted,
+           err,
+           o->predicted ? fabs((double)err) / (double)o->predicted : 0.0);
+    printf("      offered=%.0f/s (overload x%.1f)  shed=%llu limit=%llu"
+           " stale=%llu republishes=%llu\n",
+           span ? (double)o->arrivals * 1e9 / (double)span : 0.0,
+           span ? ((double)o->arrivals * 1e9 / (double)span) /
+                      ((double)ADCE_ENF_RATE_Q16_PER_NS * 1e9 /
+                       (double)ADCE_ENF_COST_Q16)
+                : 0.0,
+           (unsigned long long)o->dropped_shed,
+           (unsigned long long)o->dropped_limit,
+           (unsigned long long)o->stale_reads,
+           (unsigned long long)o->republishes);
+    printf("      side conditions: tau_final=%llu (needs < K=%llu: %s)"
+           "  max gap=%lluns\n",
+           (unsigned long long)o->tokens_final,
+           (unsigned long long)ADCE_ENF_COST_Q16,
+           o->tokens_final < (uint64_t)ADCE_ENF_COST_Q16 ? "yes" : "NO",
+           (unsigned long long)o->max_gap_ns);
+    printf("      gaps >= K/R (%lluns) = %llu ; gaps >= C/R (%lluns, would"
+           " clamp) = %llu\n",
+           (unsigned long long)((uint64_t)ADCE_ENF_COST_Q16 /
+                                ADCE_ENF_RATE_Q16_PER_NS),
+           (unsigned long long)o->gaps_over_cost,
+           (unsigned long long)((uint64_t)ADCE_ENF_CAPACITY_Q16 /
+                                ADCE_ENF_RATE_Q16_PER_NS),
+           (unsigned long long)o->gaps_over_capacity);
+    printf("      floor form   A == floor((C+R*span)/K)          : %s\n"
+           "      conservation K*A == C+R*span - R*d0 - tau_final : %s\n",
+           o->admitted == supply / (uint64_t)ADCE_ENF_COST_Q16 ? "holds"
+                                                               : "MISMATCH",
+           (uint64_t)ADCE_ENF_COST_Q16 * o->admitted ==
+                   supply - predicted_clamp - o->tokens_final
+               ? "holds"
+               : "MISMATCH");
+    printf("      RESIDUAL: L=%llu, predicted R*delta_0=%llu (%s); L+tau=%llu"
+           " of K=%llu, headroom %llu\n",
+           (unsigned long long)clamped, (unsigned long long)predicted_clamp,
+           clamped == predicted_clamp ? "exact -- initial full-bucket clamp"
+                                        " only"
+                                      : "DIFFERS -- a later refill also"
+                                        " clamped",
+           (unsigned long long)leftover,
+           (unsigned long long)ADCE_ENF_COST_Q16,
+           (unsigned long long)((uint64_t)ADCE_ENF_COST_Q16 - leftover));
+}
+
+static int test_loop_bucket_closed_form_report(void) {
+    static loop_bucket_out_t syn;
+    static loop_bucket_out_t real;
+
+    printf("  LOOP bucket closed form -- REPORT ONLY, nothing below is"
+           " asserted\n");
+    printf("    A = floor((C + R*(t_last - t_start)) / K)   C=%llu R=%llu"
+           " K=%llu\n",
+           (unsigned long long)ADCE_ENF_CAPACITY_Q16,
+           (unsigned long long)ADCE_ENF_RATE_Q16_PER_NS,
+           (unsigned long long)ADCE_ENF_COST_Q16);
+
+    /* Synthetic: exact 1 us spacing. Comfortably inside side condition (2)'s
+     * 9362 ns and 9.4x over the bucket's sustainable rate. */
+    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, &syn) == 0);
+    loop_bucket_report("synthetic", &syn);
+
+    /* Real clock, same arrival count scaled up so the REFILL term is
+     * comparable to the capacity term rather than swamped by it -- a run too
+     * short to refill would confirm only that the bucket starts full. */
+    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, &real) == 0);
+    loop_bucket_report("real clock", &real);
+
+    /* Structural only: the premise held. Zero shed reads means pressure really
+     * was pinned at the floor and the bucket really was the only limiter, which
+     * is what the derivation assumes and what a stale read would have voided. */
+    ADCE_TEST_ASSERT(syn.dropped_shed == 0u);
+    ADCE_TEST_ASSERT(real.dropped_shed == 0u);
+    ADCE_TEST_ASSERT(syn.admitted + syn.dropped_limit == syn.arrivals);
+    ADCE_TEST_ASSERT(real.admitted + real.dropped_limit == real.arrivals);
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -1453,3 +1762,4 @@ ADCE_LOOP_TEST_EXPORT(loop_ramp_fixed_point_report)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_below_threshold)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_above_threshold)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_teeth)
+ADCE_LOOP_TEST_EXPORT(loop_bucket_closed_form_report)
