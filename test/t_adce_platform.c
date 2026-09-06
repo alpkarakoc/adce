@@ -349,6 +349,7 @@ int adce_t_loop_ramp_fixed_point_report(void);
 int adce_t_loop_ramp_below_threshold(void);
 int adce_t_loop_ramp_above_threshold(void);
 int adce_t_loop_ramp_teeth(void);
+int adce_t_loop_bucket_closed_form_report(void);
 
 int main(void) {
     struct {
@@ -399,6 +400,7 @@ int main(void) {
         {"loop_ramp_below_threshold", adce_t_loop_ramp_below_threshold},
         {"loop_ramp_above_threshold", adce_t_loop_ramp_above_threshold},
         {"loop_ramp_teeth", adce_t_loop_ramp_teeth},
+        {"loop_bucket_closed_form_report", adce_t_loop_bucket_closed_form_report},
     };
 
     int failures = 0;

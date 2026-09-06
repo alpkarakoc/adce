@@ -520,6 +520,52 @@ evidenced by the fixture that can actually run the gate: `test_harness_concurren
 admitted landing within a handful of arrivals of the ceiling. Not unevidenced — evidenced
 elsewhere, by the right instrument.
 
+### The bucket's own fixture — confronted, not yet asserted
+
+`loop_bucket_closed_form_report` is the fixture the narrowing above said the ceiling claim
+needs. It reports; it asserts nothing beyond the structural guard that pressure really was
+pinned and the bucket really was the only limiter.
+
+**The derivation.** With pressure pinned at `ADCE_PRESSURE_MIN` and the epoch kept fresh,
+`adce_enf_should_shed` is `(draw >> 48) < 0` — false for every draw — so every arrival
+reaches stage two. Summing `adce_enf_decide`'s bucket update over `M` arrivals telescopes to
+
+    K*A = C + R*(t_last - t_start) - L - tau_final
+
+with `L` the tokens the cap discarded. The elapsed terms telescope *only* because
+`last_refill_ns` is advanced on every arrival that reaches stage two, **dropped ones
+included** — that is the load-bearing detail, not an incidental one.
+
+**The residual has a derivation.** `L` is not zero and cannot be: `adce_enf_thread_init`
+starts the bucket FULL, so the first arrival refills into a bucket already at capacity and
+discards exactly `R*delta_0`. Measured, the identity closes with `L = R*delta_0` exactly in
+both arms — the initial clamp and nothing else. A later clamp needs a gap long enough to
+refill from starved back to capacity, `C/R = 38.3 ms`; none occurred.
+
+**Both arms are exact.**
+
+| arm | span | admitted | predicted | relative error |
+|---|---|---|---|---|
+| synthetic, exact 1 µs spacing | 40.000 ms | 8368 | 8368 | **0.000e+00** |
+| real `adce_now_ns`, 2e6 arrivals | ~32 ms | 7504 | 7504 | **0.000e+00** |
+
+The real-clock arm survives clock granularity because the derivation never assumes anything
+about *where* the timestamps come from — it is pure conservation, and a repeated or coarse
+reading contributes `delta = 0` without breaking the telescoping.
+
+**Which equality to assert, and which is a trap.** The obvious form
+`A == floor((C + R*span)/K)` requires `L + tau_final < K`, and `tau_final` is effectively
+uniform over `[0,K)` across runs, so it fails whenever `tau_final` lands in `[K-L, K)` —
+probability about `L/K`. Over 400 real-clock runs it mismatched **5 times**. (One campaign,
+consistent in order of magnitude with `L/K`; not quoted as a rate.) The conservation form
+
+    K*A == C + R*(t_last - t_start) - R*delta_0 - tau_final
+
+never divides, so it has no leftover condition at all, and every term is directly
+observable. Over the same 400 runs it mismatched **zero** times. **That is the equality a
+later step should assert.** The floor form would have been an underived number arrived at by
+a different route.
+
 ### What the teeth had to cover, and what the obvious mutation misses
 
 The natural counterfactual for case 5 is a ramp above `g*`, and it is necessary: it breaks
