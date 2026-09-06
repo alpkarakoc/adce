@@ -1,6 +1,8 @@
 # Closed-loop harness — design
 
-Status: design only. No implementation exists. This document exists because
+Status: **cases 1-4 of §7 implemented in `test/t_adce_loop.c`; cases 5-6 not.** The
+synthetic rig, the settle metrics and their teeth exist and run in the per-edit gate. The
+ramp cases do not, and §7 says why. This document exists because
 `docs/enforcement-plane.md` §5 and `docs/observation-plane.md` §5 have both listed
 closed-loop behaviour as needing a harness since the planes were written, and it is the
 one item on either list that is a claim about the DESIGN rather than about a function.
@@ -21,9 +23,19 @@ whether the pair settles or oscillates is a property of neither alone.
 the tap statement executes before the gate statement at a site that has both, and that the
 identity `tapped == admitted + dropped` distinguishes the two. That is a static property of
 a call site, established over a frozen `now_ns` with no observer running and no epoch ever
-closing. **Nothing in this repository has ever run the detector and the actuator against
-each other over time.** The dynamics half of §2 — "limit-cycle oscillation rather than
-settling" — has no executable evidence in either direction.
+closing.
+
+That sentence used to continue "**nothing in this repository has ever run the detector and
+the actuator against each other over time**", and `test/t_adce_loop.c` has made it false.
+What is now run is the INTERNAL loop, exactly: the published pressure trajectory is
+bit-identical across two draw streams under the correct ordering and diverges under the
+inverted one, over 400 model epochs. That is §1's internal loop shown open over time, with
+no band and no tolerance.
+
+The dynamics half of §2 — "limit-cycle oscillation rather than settling" — still has no
+executable evidence in either direction, and the rig does not supply it: the rig produces
+no limit cycle to measure, which is why §5's teeth have to fabricate one. Settling remains
+a statement about the EXTERNAL loop, and §5's preconditions for claiming it are unmet.
 
 This document says what evidence would look like, and is deliberate about the part that
 cannot be evidence: this project does not gate on timing, and §5 below says plainly which
@@ -343,9 +355,23 @@ Two counterfactuals, both required:
   `test_harness_tap_after_gate` asserts a broken identity. Same two draw streams, tap after
   the gate: the trajectories must DIFFER. If they ever stop differing, the invariance
   assertion above has lost its teeth.
-- *Non-vacuity:* the two draw streams must produce different `dropped_shed` counts in the
-  correct arm too. Otherwise "identical trajectories" would be satisfied by draws that
-  never mattered anywhere.
+- *Non-vacuity:* the two draw streams must produce a different per-arrival VERDICT
+  SEQUENCE in the correct arm too. Otherwise "identical trajectories" would be satisfied by
+  draws that never mattered anywhere.
+
+  This bullet originally named `dropped_shed`, and the implementation refuted it. That
+  count is a scalar sum of ~38,000 Bernoulli trials, so two streams collide on it whenever
+  their sums happen to coincide -- and the FIRST seed pair tried did exactly that: seeds
+  `0xA5A5A5A5` and `0x5EED1234` both shed exactly 24,075 of 720,000 arrivals while their
+  verdicts differed throughout, which failed the assertion on a rig that was working
+  correctly. Across 24 seeds the totals ran 23,801..24,282 with a standard deviation of
+  111, putting the collision probability near `1/(2*sd*sqrt(pi))` ~ 0.25%. **That figure is
+  ANALYTIC, from the observed spread. The one collision is a single observation and is not
+  quoted as a rate** -- the error this project has recorded four times.
+
+  A checksum over the verdict sequence has no such failure mode: it differs unless the two
+  streams produced the same verdict for every arrival, which is the exact statement
+  non-vacuity exists to exclude. The totals are still printed; they are just not asserted.
 - *Reproducibility:* the whole synthetic run repeated yields a bit-identical trajectory,
   which is `enf_determinism` and `obs_determinism` extended over a closed loop.
 - *The slow ramp holds pressure at `ADCE_PRESSURE_MIN`* over the steady portion of a
@@ -397,7 +423,7 @@ today and less than "the design settles".
 | --- | --- | --- |
 | `test/t_adce_loop.c` | the synthetic rig, the settle metrics, their teeth, and the reported real-time arm | a new file, not an addition to `t_adce_harness.c`, which is already 1500 lines and is about a call site rather than about dynamics |
 | `docs/closed-loop-harness.md` | this document | |
-| `test/t_adce_platform.c` | six forwarder declarations and six runner-table rows | the single runner table; required by the ran-tests guard in `scripts/verify.sh` |
+| `test/t_adce_platform.c` | one forwarder declaration and one runner-table row per case | the single runner table; required by the ran-tests guard in `scripts/verify.sh` |
 
 Nothing in `src/` or `include/` changes. Every injection point this rig needs already
 exists and already has a stated reason for existing.
@@ -406,6 +432,14 @@ Cases are `static int test_<name>(void)` with one external forwarder each, per t
 convention `test/t_adce_observe.c` established.
 
 ## 7. The first assertions, in dependency order
+
+**Status: 1-4 LANDED in `test/t_adce_loop.c`. 5 and 6 are not implemented** -- they rest on
+the section 2B fixed point, and that derivation has not been confronted with the code;
+cases 1-4 are decidable from the offered sequence and the published integers alone and so
+do not inherit that exposure. A fifth case, `loop_step_response_report`, is registered
+beside them: it is NOT case 5 below, it asserts no band, and it exists to supply the half of
+case 4 that a fabricated sequence cannot -- that a window opened after the measured end of a
+transient is exactly clear of it on a real step.
 
 1. `loop_synthetic_determinism` — the rig run twice yields a bit-identical pressure
    trajectory. Everything below is meaningless if this fails, and it fails loudly if any
