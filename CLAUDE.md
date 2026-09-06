@@ -121,6 +121,18 @@ looking.
   This did not replace a written convention — there was none. Every change since #1 has
   landed by PR as an unwritten practice; what changed is that the practice is now
   enforced by the server instead of by whoever is at the keyboard.
+
+  **`gh pr checks` shows FOUR green checks and only three of them are required.** The
+  fourth is `CodeRabbit`, and on every PR in this repository it reports
+  `Review skipped: manual review required for this OSS repository` — it passes green having
+  reviewed nothing. Verified against the ruleset rather than against the PR page: the
+  required contexts are exactly `sanitizers (ubuntu-24.04)`,
+  `sanitizers (ubuntu-24.04-arm)` and `shipping-target`. Recorded because a reader counting
+  green ticks would conclude the bar is four checks including a review, and the actual bar
+  is three checks and no review at all — `required_approving_review_count` is 0, as above.
+  A skipped review that renders as a pass is the same defect class as a silently-skipping
+  profile, which this project has ruled worse than one that does not exist; it is not this
+  repository's to fix, so it is documented instead.
 - `adce_rng_seed` calls `abort()` when the entropy draw fails. A PRNG seeded from a
   failed or partial draw is predictable and every downstream containment decision
   inherits that, so there is deliberately no degraded seeding path.
@@ -513,54 +525,99 @@ looking.
   EWMA has no memory, and sup z is unbounded.
 
 - Still unverified, in descending order of how much each would change a decision. The
-  order changed on 2026-09-05; the reasons are stated per entry rather than left implicit,
-  because the previous order put the cheapest gap first.
+  order changed on 2026-09-05, and again on 2026-09-06 after PRs #10-#14 landed the
+  closed-loop harness; the reasons are stated per entry rather than left implicit.
 
-  **(1) Closed-loop behaviour — oscillation, settling, limit cycles.** Promoted to the top:
-  it is a central claim of the design rather than a coverage gap, and if the two-stage
-  defence oscillates instead of settling, the library does not do the job it exists for.
-  Nothing else on this list can invalidate the product.
+  **What changed on 2026-09-06, before the entries.** The list was last written at
+  `4b83276` (#9). Its entry (1) said `test/t_adce_loop.c` does not exist and that
+  closed-loop evidence is ZERO in either direction. That file is on `main` at **2008
+  lines** with **twelve** registered cases, and the statement is now false. Stale in the
+  UNDER-claiming direction is still stale: it understates what is covered and so misdirects
+  the next reader, which is the same defect as overstating it. What follows was read out of
+  the merged tests, not out of any summary.
 
-  The state is now MODEL DESIGNED, NEVER RUN, which is not the same as the "no load model
-  and no evidence" this entry used to say — and the difference matters in exactly one
-  direction, because this project's standard is that written is not run.
-  `docs/closed-loop-harness.md` specifies the load patterns, the settle observable, the
-  determinism strategy and the first six assertions. Not one line of it has executed.
-  `test/t_adce_loop.c` does not exist. So the evidence in either direction is still ZERO,
-  and a design document must not be mistaken for a result: what changed is that the
-  experiment is now specified, not that it was performed.
+  | case | asserts | explicitly declines |
+  |---|---|---|
+  | `loop_synthetic_determinism` | same seed twice: bit-identical trajectory, tapped, shed, admitted, and the whole per-arrival verdict checksum; trajectory non-constant | — |
+  | `loop_draw_invariance` | two DIFFERENT draw streams, tap before gate: pressure trajectory bit-identical epoch for epoch over 400 epochs; tapped equals the offered total exactly; verdict checksums DIFFER | asserting different `dropped_shed` totals — the witness `closed-loop-harness.md` §5 originally named. Measured to collide: two seeds both shed exactly 24075 of 720000 |
+  | `loop_inverted_draw_dependence` | inverted ordering: trajectories DIFFER; tapped differs and is strictly below the offered total | — |
+  | `loop_settle_metrics_teeth` | exact integer `PP`/`TV`/`DC`/`R` on fabricated sequences | any settle predicate. `B` and `D` are underived, so the case asserts metric VALUES, never a verdict |
+  | `loop_step_response_report` | structural only: publication count, `post.pp > 0`, transient end bracketed, post-transient window `PP==R==DC==0` | every step-response number |
+  | `loop_ramp_fixed_point_report` | `rc == 0` and nothing else | every measured `z`, both steady-state comparisons, the whole epoch-by-epoch table |
+  | `loop_ramp_below_threshold` | pressure pinned at `ADCE_PRESSURE_MIN` across the derived window AND offered volume grew >= 100x; liveness via publications and `epoch_id` | the bucket-ceiling half — see below |
+  | `loop_ramp_above_threshold` | pressure strictly above MIN across the window, and strictly BELOW `ADCE_PRESSURE_MAX` | — |
+  | `loop_ramp_teeth` | the floor predicate rejects a ramp above g\*; the lifted predicate rejects one below; a FLAT load passes the floor predicate and is rejected only by the growth half | — |
+  | `loop_bucket_closed_form_report` | structural only: `shed == 0`, `admitted + limit == arrivals` | both candidate equalities, both error figures, the residual |
+  | `loop_bucket_conservation` | `K*A == C + R*span - R*delta_0 - tau_final` on a synthetic and a real-clock arm, gated on `gaps_over_capacity == 0`; premise asserted via `shed == 0`, `stale == 0`, `limit > 0` | the floor form `A == floor((C+R*span)/K)`, REPORTED beside it and never asserted |
+  | `loop_bucket_identity_teeth` | the identity predicate rejects one admission over, one under, the over-admission shape, and — same numbers, stall flag set — a stall | — |
 
-  Two things in that document are worth reading before anyone builds it. The primary
-  assertion needs no band and no timing — with the tap before the gate the counter is a
-  function of the offered sequence alone, so the published pressure trajectory must be
-  bit-identical across two different draw streams, and the inverted ordering must diverge.
-  And the settle BAND is deliberately not assertable; §5 there states what a measurement
-  would have to show first.
+  **Two declines are load-bearing and must not be read as gaps.** #12 narrowed case 5 to
+  the Observation-plane half because a geometric ramp CANNOT drive the per-arrival path:
+  the g = 0.02 ramp offers 5.24e14 arrivals, ~30 days at the ~5 ns gate cost, so the counter
+  is injected and the gate is not in the loop. Asserting a ceiling from a fixture that
+  cannot run the gate would be fitting the evidence to the assertion. And #13 reports the
+  floor form without asserting it because it needs `L + tau_final < K` and `tau_final` is
+  effectively uniform over `[0,K)`: it mismatched 5 of 400 real-clock runs where the
+  conservation form mismatched zero. A reported number and an asserted one are different
+  claims and the entry keeps them apart.
 
-  **(2) The Darwin half of `adce_platform_get_entropy`** — the `getentropy` chunking loop —
-  has no automated coverage at all: CI is Linux-only and takes the `getrandom` branch, so
-  that code runs only on the development machine. No CI job runs macOS, which is the
-  platform the per-edit gate runs on. Unchanged in position, and it stays above the two
-  below because it is the only entry here where a whole code path is unexecuted by any
-  automated gate.
+  **(1) The contended cost of `adce_obs_tap`.** Promoted from inside the old (3) to the
+  top. Verified before promoting: `adce_obs_tap` appears NOWHERE in `test/t_adce_latency.c`,
+  and that file creates no threads at all, so the contended cost has zero evidence rather
+  than weak evidence. It is a relaxed `fetch_add` on ONE cache line shared by every ingress
+  thread, so each increment needs exclusive ownership of that line and pays a cross-core
+  transfer under contention — structurally the one per-arrival term that does not scale.
 
-  **(3) Per-arrival latency under CONTENTION.** §5 of `docs/enforcement-plane.md` now
-  carries the measurement — both architectures, per outcome, with the method — so the
-  gate's cost is no longer an open question. What is still open is that every one of those
-  figures comes from a fixture with no concurrent publication: `adce_epoch_read` never
-  retried, so the seqlock's retry path has never been timed and §2's estimate of those odds
-  remains analytic. A second unmeasured term sits beside it and was surfaced by the
-  closed-loop design: `adce_obs_tap` is a relaxed `fetch_add` on ONE cache line shared by
-  every ingress thread, and its contended cost has never been measured either. It is
-  plausibly larger than the gate and the clock combined, and it is the term that decides
-  whether any offered rate derived from `gate + clock` is actually achievable.
+  It ranks first because it is the term that decides whether any offered rate derived from
+  `gate + clock` is achievable, and `closed-loop-harness.md` §4 already publishes a bound —
+  27-59 M arrivals/s per thread — that it explicitly flags as an upper bound the tap may not
+  permit. Running it can invalidate a published number by an order of magnitude. Nothing
+  else on the list has that reach.
 
-  **(4) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
-  so every race result in this project is Clang's. It was (1) and is now LAST, and the move
-  is the list's own ordering principle applied rather than a change of taste: entries rank
-  by how much running them would change a decision, and once the instrument is known to be
-  near-identical to one already in the matrix, it changes less than the untimed seqlock
-  retry path above it does.
+  **(2) The aggregate ceiling under real concurrency, as a two-sided identity.** Runnable,
+  untested, and the next task. `loop_bucket_conservation` proves
+  `K*A == C + R*span - R*delta_0 - tau_final` single-threaded on both clocks; the shipped
+  configuration is per-thread buckets whose aggregate ceiling is `threads * rate`, which the
+  deployment-tuning comment in `adce_enforce.h` warns is misread as a global ceiling.
+  `test_harness_concurrent` covers that configuration only ONE-SIDEDLY
+  (`admitted <= rate*elapsed + capacity`).
+
+  That one-sidedness is a measured blind spot, not a theoretical one. Two scratch mutations
+  in #14: advancing `last_refill_ns` on admission only over-admits 65% (13806 against 8368)
+  and is caught by four tests; refilling at half rate UNDER-admits 26% (6232 against 8368)
+  and is caught by **exactly one test in the suite**, the new single-threaded identity.
+  Every pre-existing ceiling check is one-sided and an under-admitting bucket moves away
+  from the bound, so all of them pass. A gate silently throttling a quarter more than the
+  deployment configured is an availability defect that was invisible here until #14, and it
+  is still invisible in the concurrent configuration.
+
+  It ranks below (1) rather than above it because each thread's bucket is private and
+  non-atomic, so contention does not change the arithmetic and the extension is more likely
+  to CONFIRM than to surprise. Probable confirmation ranks below a measurement that can
+  overturn a published bound. What blocks it is small and additive: `first_gap_ns` and the
+  per-thread `t_start`/`t_last` are not recorded in `t_adce_harness.c`, and that file has a
+  documented history of accounting identities being perturbed by instrumentation — the
+  read-only-observer argument from #6 applies and must be stated rather than assumed, since
+  that file already distinguishes observers from drains.
+
+  **(3) The Darwin half of `adce_platform_get_entropy`** — the `getentropy` chunking loop —
+  has no automated coverage at all. Re-checked: `.github/workflows/verify.yml` runs
+  `ubuntu-24.04` and `ubuntu-24.04-arm` only, so CI takes the `getrandom` branch and no job
+  runs macOS, which is the platform the per-edit gate runs on. It stays above the two
+  runnable entries below because it is the only entry where a whole code path is unexecuted
+  by any automated gate.
+
+  **(4) The seqlock retry path has never been timed.** The other half of the old (3), left
+  behind when the tap was promoted out of it. §5 of `docs/enforcement-plane.md` measures the
+  gate on both architectures per outcome, but every figure comes from a fixture with no
+  concurrent publication, so `adce_epoch_read` never retried and §2's estimate of those odds
+  remains analytic. Below (3) because the path is executed under
+  `test_harness_concurrent` — the measurements there record nonzero `torn` reads — it is
+  only its COST that is unmeasured.
+
+  **(5) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
+  so every race result in this project is Clang's. Last among the runnable entries, and the
+  position is the list's own principle applied rather than a change of taste.
 
   The demotion rests on a verified fact. GCC does not implement its own race detector, it
   VENDORS LLVM's — checked rather than assumed, against the same `gcc:14` image the gate
@@ -577,6 +634,42 @@ looking.
   33748342781 was a phase-accounting race, which is a LOGICAL race, and no ThreadSanitizer
   of any vendor can see one — it appeared in the strict `-O2` profile, and ASan and TSan
   dilate execution enough to mask that class.
+
+  **(6) The settle band, and it is BLOCKED rather than unattempted.** Last, because the
+  list ranks by how much RUNNING an entry would change a decision and there is nothing to
+  run: no experiment resolves this one. That is the entry's content, not an excuse appended
+  to it.
+
+  `DC` is unusable as specified, and this was measured rather than argued. A full-scale
+  square wave and a 1-LSB dither produce **identical `DC` (198) and identical `R`
+  (199.0000)**, differing only in `PP`, by 65536x. Both metrics are amplitude-blind by
+  construction — `R` because it is a ratio, `DC` because it counts signs — so neither can be
+  given a deadband from its own definition. The only quantity that separates a full-scale
+  limit cycle from quantization dither is `PP`, and a threshold on `PP` IS the settle band
+  `B`. **The deadband question reduces to `B` rather than being a second open number**, and
+  `B` has no derivation. No threshold was invented; `DC` is reported unusable and
+  `loop_settle_metrics_teeth` asserts metric values only.
+
+  `R` is separately compromised in a way that has the same root. It deflates when a window
+  mixes a one-time transient with a persistent cycle, because `PP` is set by the transient
+  while `TV` is shared: a step to 0.8 with a 0.01 dither reports `R = 4.68` and an implied
+  period of 171 epochs against a true period of 2, and at amplitude 87 of 65536 the full
+  window reports `R = 1.4937` — which no threshold admitting a settling trajectory can
+  separate from the monotone decay's exact 1.0. A trailing window recovers the true 199, and
+  `loop_step_response_report` shows such a window is exactly clear of a real step's
+  transient (`PP == 0` after the measured 5-epoch decay). But choosing where to open it is
+  again an amplitude judgement.
+
+  What IS settled, and is the reason this entry no longer sits at the top: the INTERNAL
+  loop is proven open over time, exactly and without a band — `loop_draw_invariance` gives
+  bit-identical trajectories across two draw streams over 400 epochs and
+  `loop_inverted_draw_dependence` gives divergence under the inverted ordering. The
+  DYNAMICS half of `observation-plane.md` §2 — "limit-cycle oscillation rather than
+  settling" — still has no executable evidence in either direction, and the rig cannot
+  supply it: it produces no limit cycle to measure, which is why the teeth have to fabricate
+  one. Settling remains a statement about the EXTERNAL loop, whose client model this
+  repository has no basis for choosing, and §5's four preconditions for claiming it are
+  unmet — of which the underived `B` is the first.
 
   Separately, and by design rather than by omission: the `abort()` in `adce_rng_seed` has
   never executed, and cannot without fault injection.
