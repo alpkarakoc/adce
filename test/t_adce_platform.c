@@ -334,6 +334,18 @@ int adce_t_harness_stale_split_teeth(void);
  * timing threshold is deliberately absent. */
 int adce_t_latency_per_arrival(void);
 
+/* Closed-loop cases, in test/t_adce_loop.c. Same convention. These are the only
+ * cases that run the detector and the actuator against each other over TIME,
+ * on a synthetic clock the rig owns, so two runs are bit-identical. They assert
+ * no band: docs/closed-loop-harness.md section 5 records the settle band as
+ * underived, and loop_step_response_report REPORTS its numbers for that reason
+ * -- it is not that document's case 5, which is a ramp and is not implemented. */
+int adce_t_loop_synthetic_determinism(void);
+int adce_t_loop_draw_invariance(void);
+int adce_t_loop_inverted_draw_dependence(void);
+int adce_t_loop_settle_metrics_teeth(void);
+int adce_t_loop_step_response_report(void);
+
 int main(void) {
     struct {
         const char *name;
@@ -374,6 +386,11 @@ int main(void) {
         {"harness_stale_posture", adce_t_harness_stale_posture},
         {"harness_stale_split_teeth", adce_t_harness_stale_split_teeth},
         {"latency_per_arrival", adce_t_latency_per_arrival},
+        {"loop_synthetic_determinism", adce_t_loop_synthetic_determinism},
+        {"loop_draw_invariance", adce_t_loop_draw_invariance},
+        {"loop_inverted_draw_dependence", adce_t_loop_inverted_draw_dependence},
+        {"loop_settle_metrics_teeth", adce_t_loop_settle_metrics_teeth},
+        {"loop_step_response_report", adce_t_loop_step_response_report},
     };
 
     int failures = 0;
