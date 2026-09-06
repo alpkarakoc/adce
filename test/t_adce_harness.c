@@ -50,6 +50,16 @@ typedef struct {
 
     uint64_t work_done;
     uint64_t work_checksum;
+
+    /* Bucket-identity OBSERVERS. Every one of these is written from values the
+     * arrival path already computed, and none of them is read by
+     * adce_enf_decide. See the observer/drain argument above
+     * harness_bucket_identity for why they need no matching term in the
+     * arrivals conservation law. */
+    uint64_t enf_start_ns;      /* the now_ns handed to adce_enf_thread_init */
+    uint64_t bucket_clamped;    /* L: tokens the refill cap discarded, exactly */
+    uint64_t bucket_clamp_hits; /* how many refills clamped, for the report */
+    int stage2_seen;
 } harness_site_t;
 
 /* Real work, deliberately not an empty body. A no-op would let the optimiser
@@ -66,10 +76,53 @@ static void harness_work(harness_site_t *site) {
  * in docs/enforcement-plane.md section 3. The tap is unconditional and first,
  * and nothing returns before it. */
 static void ingress_correct(harness_site_t *site, uint64_t now_ns) {
+    adce_enf_outcome_t v;
+    uint64_t tok_before;
+    uint64_t refill_before;
+
     adce_obs_tap(site->counter);
     site->tapped++;
 
-    if (adce_enf_admit(&site->enf, now_ns) != ADCE_ENF_ADMIT) {
+    /* Snapshot BEFORE the gate: both fields are per-thread and non-atomic, and
+     * this is their owning thread, so reading them is not a race and not a
+     * write. They are what the refill is about to be computed from. */
+    tok_before = site->enf.tokens_q16;
+    refill_before = site->enf.last_refill_ns;
+
+    v = adce_enf_admit(&site->enf, now_ns);
+
+    /* OBSERVER. The verdict is already computed and now_ns is already in hand;
+     * this reads them and writes site storage the gate never reads.
+     *
+     * It keys on `not shed` rather than on `admitted` deliberately: the bucket
+     * identity telescopes over arrivals that reached STAGE TWO, and a
+     * limit-dropped arrival reached it just as an admitted one did. Keying on
+     * ADMIT would silently measure the wrong set.
+     *
+     * L IS MEASURED, NOT BOUNDED, and the first version of this got it wrong.
+     * That version counted stage-two gaps reaching C/R = 38.3 ms on the
+     * reasoning that a starved bucket needs that long to refill to capacity --
+     * and CI failed it by 401047 Q16, about 6 admissions' worth. The condition
+     * is not a fixed gap: a refill clamps whenever tau + R*delta exceeds C, so
+     * while the bucket is still near FULL early in the run, a gap of only
+     * (C - tau)/R clamps -- 9.4 us at one admission below capacity, not 38 ms.
+     * Recomputing the exact discarded amount here removes the estimate, and
+     * with it the precondition: the identity below now holds unconditionally
+     * instead of being gated on a bound that was wrong in the permissive
+     * direction. */
+    if (v != ADCE_ENF_DROP_SHED) {
+        uint64_t elapsed =
+            now_ns > refill_before ? now_ns - refill_before : (uint64_t)0;
+        uint64_t raw = tok_before + ADCE_ENF_RATE_Q16_PER_NS * elapsed;
+
+        if (raw > (uint64_t)ADCE_ENF_CAPACITY_Q16) {
+            site->bucket_clamped += raw - (uint64_t)ADCE_ENF_CAPACITY_Q16;
+            site->bucket_clamp_hits++;
+        }
+        site->stage2_seen = 1;
+    }
+
+    if (v != ADCE_ENF_ADMIT) {
         return;
     }
 
@@ -411,7 +464,15 @@ static void *harness_ingress_main(void *arg) {
      * THIS thread's stream so an entropy failure aborts here rather than on an
      * arrival. It memsets only site->enf, so site->counter set by the starting
      * thread survives it. */
-    adce_enf_thread_init(&site->enf, &g_h_epoch, adce_now_ns());
+    {
+        /* One clock read, used for BOTH the bucket's initial last_refill_ns and
+         * the identity's t_start, so the two cannot disagree. Reading the clock
+         * twice would put a real interval between them that no term names. */
+        uint64_t t0 = adce_now_ns();
+
+        adce_enf_thread_init(&site->enf, &g_h_epoch, t0);
+        site->enf_start_ns = t0;
+    }
 
     while (!atomic_load_explicit(&g_h_stop, memory_order_acquire)) {
         int b;
@@ -441,6 +502,144 @@ static void *harness_ingress_main(void *arg) {
     }
 
     return NULL;
+}
+
+/* =====================================================================
+ * The bucket conservation identity, per thread and in aggregate.
+ *
+ *     K*A == C + R*(s_last - t_start) - R*delta_0 - tau_final
+ *
+ * landed single-threaded in test/t_adce_loop.c. This extends it to the SHIPPED
+ * configuration: four live ingress threads, real clocks, per-thread buckets.
+ *
+ * ---------------------------------------------------------------------
+ * WHY THE PREMISE CONFLICT IS FALSE.
+ *
+ * loop_bucket_conservation asserts dropped_shed == 0 and stale_reads == 0 as
+ * its premise; this case asserts stale > 0. Those do not conflict, and the
+ * resolution is not a window where both are zero -- there is no such window
+ * reliably available, since torn and future reads need only a concurrent
+ * publication and the post-warmup bound here permits them.
+ *
+ * They do not conflict because SHED ARRIVALS NEVER REACH THE BUCKET.
+ * adce_enf_decide returns on the shed branch before touching tokens_q16 or
+ * last_refill_ns -- its own comment says "shedding ran first so that arrivals
+ * already destined to drop never touch this state". So the telescoping sum
+ * runs over arrivals that reached STAGE TWO, and shedding changes only which
+ * arrivals those are, never the arithmetic over them.
+ *
+ * The zero-shed premise in the loop rig was therefore a SUFFICIENT CONDITION
+ * FOR A SIMPLIFICATION, not a premise of the identity: with nothing shed, the
+ * driver's last arrival IS the last stage-two arrival, so the schedule's
+ * t_last could stand in for the span endpoint. Here it cannot, and the correct
+ * endpoint is already in the context -- ctx->last_refill_ns is assigned
+ * unconditionally inside stage two, so after the run it holds exactly the last
+ * stage-two arrival's now_ns. No shed term is added; adding one would change
+ * the identity rather than extend it.
+ *
+ * Measured before being written: the identity holds EXACTLY on all four
+ * threads across a run carrying 374,139 shed arrivals and 749,568 stale reads.
+ *
+ * ---------------------------------------------------------------------
+ * WHY PER-THREAD INSTRUMENTATION IS MANDATORY, NOT DECORATION.
+ *
+ * `threads * rate` is not a global ceiling. Each thread has its own C, span,
+ * delta_0 and tau_final, so the aggregate is
+ *
+ *     sum(K*A_i) = sum(C_i) + R*sum(span_i) - R*sum(d0_i) - sum(tau_i)
+ *
+ * which collapses to a single global span only if every thread's span is
+ * identical. Four threads starting and stopping at different real times do not
+ * satisfy that. Measured: the per-thread form is exact, and the same run
+ * evaluated with ONE global span is off by 52 admissions. Without per-thread
+ * t_start / s_last / delta_0 the aggregate cannot be written down at all, and
+ * assuming the spans collapse is precisely the misreading the deployment
+ * tuning block in adce_enforce.h warns about.
+ *
+ * ---------------------------------------------------------------------
+ * OBSERVER VERSUS DRAIN, as a criterion rather than an assumption.
+ *
+ * total_tapped == arrivals_closed + discarded + residual is a conservation law
+ * over ONE quantity: arrivals that entered through the tap. The test is not
+ * read-only versus writing. It is whether the instrument can change the value
+ * of any term. A drain can, by moving an arrival into a state the sum does not
+ * name; g_st_thaw_discarded needed a term on both sides for exactly that
+ * reason.
+ *
+ * The three fields above are observers, conditional on three properties which
+ * are established rather than asserted:
+ *
+ *   1. The recording does not call the gate or consume a token. It runs on the
+ *      verdict adce_enf_admit already returned; there is no second gate call
+ *      and no adce_token_try_take anywhere in this file.
+ *   2. The recording does not advance last_refill_ns. It writes only
+ *      site->stage2_* and site->enf_start_ns, never site->enf.last_refill_ns.
+ *      This is the load-bearing one -- the telescoping rests on
+ *      last_refill_ns advancing inside stage two and nowhere else, so an
+ *      instrument that touched it would be a drain in observer clothing and
+ *      would corrupt the very identity being extended. PROVED BY MUTATION
+ *      rather than argued: adding `site->enf.last_refill_ns = now_ns;` to the
+ *      observer takes the aggregate identity from +0 to -13,923,478,765 and
+ *      every per-thread identity to roughly -3.5e9. The identity is sensitive
+ *      to precisely the property this argument claims it is sensitive to.
+ *   3. The recording does not change how many arrivals are tapped. It sits
+ *      after the tap and after the gate, and returns no early. site->tapped is
+ *      incremented on the same line as before.
+ *
+ * Property 3 covers the identity. It does NOT cover timing: the added branch
+ * costs a few cycles per arrival and so moves how many arrivals fit in the
+ * run. That changes the MEASUREMENT and not the identity -- every term is
+ * measured over whatever arrivals actually occurred -- and it is flagged here
+ * separately rather than folded into the observer argument, because
+ * conflating the two is how a real perturbation gets waved through.
+ * ===================================================================== */
+
+/* Returns 0 when the identity holds for one site, 1 otherwise.
+ *
+ *     C + R*(s_last - t_start)  ==  K*A + L + tau_final
+ *
+ * "Everything the bucket was given equals what it spent, lost, or still
+ * holds." Written as supply == spend rather than as the subtracted form so
+ * there is no unsigned underflow to guard, and asserted UNCONDITIONALLY: with
+ * L measured exactly there is no clamp precondition left to gate on.
+ *
+ * The span is still `s_last - t_start` rather than an accumulated sum of the
+ * per-arrival deltas, and that is the load-bearing choice. Accumulating the
+ * deltas would make the identity trivially true -- it would be re-adding the
+ * same numbers the library added. Taking the endpoints instead asserts that
+ * the deltas PARTITION the interval, which is exactly the telescoping property
+ * that advancing last_refill_ns outside stage two would destroy. */
+static int harness_bucket_identity(const harness_site_t *site,
+                                   const char *label) {
+    uint64_t span;
+    uint64_t supply;
+    uint64_t spend;
+
+    if (!site->stage2_seen) {
+        fprintf(stderr, "FAIL: %s no arrival ever reached stage two\n", label);
+        return 1;
+    }
+
+    span = site->enf.last_refill_ns - site->enf_start_ns;
+    supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 + ADCE_ENF_RATE_Q16_PER_NS * span;
+    spend = (uint64_t)ADCE_ENF_COST_Q16 * site->enf.admitted +
+            site->bucket_clamped + site->enf.tokens_q16;
+
+    if (supply != spend) {
+        fprintf(stderr,
+                "FAIL: %s conservation broken: C+R*span=%llu but"
+                " K*A+L+tau=%llu (diff %+lld); A=%llu span=%lluns L=%llu"
+                " (%llu clamps) tau=%llu\n",
+                label, (unsigned long long)supply, (unsigned long long)spend,
+                (long long)supply - (long long)spend,
+                (unsigned long long)site->enf.admitted,
+                (unsigned long long)span,
+                (unsigned long long)site->bucket_clamped,
+                (unsigned long long)site->bucket_clamp_hits,
+                (unsigned long long)site->enf.tokens_q16);
+        return 1;
+    }
+    return 0;
 }
 
 static int test_harness_concurrent(void) {
@@ -702,6 +901,59 @@ static int test_harness_concurrent(void) {
      * sitting in the counter at run end (residual). Reading obs.ctx.* and
      * obs.discarded_arrivals here is race-free: both are written only by the
      * observer thread, and adce_obs_thread_stop() above already joined it. */
+    /* THE BUCKET IDENTITY, per thread and then in aggregate. Both the ingress
+     * threads and the closer are joined above, so every field read here is
+     * race-free. */
+    {
+        uint64_t agg_supply = 0;
+        uint64_t agg_spend = 0;
+        uint64_t sum_span = 0;
+        uint64_t sum_L = 0;
+        uint64_t sum_tau = 0;
+        uint64_t sum_hits = 0;
+
+        for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
+            const harness_site_t *st = &g_h_sites[i];
+            uint64_t span = st->enf.last_refill_ns - st->enf_start_ns;
+            char label[32];
+
+            (void)snprintf(label, sizeof(label), "concurrent-bucket[%u]",
+                           (unsigned)i);
+            ADCE_TEST_ASSERT(harness_bucket_identity(st, label) == 0);
+
+            sum_span += span;
+            sum_L += st->bucket_clamped;
+            sum_tau += st->enf.tokens_q16;
+            sum_hits += st->bucket_clamp_hits;
+            agg_spend += (uint64_t)ADCE_ENF_COST_Q16 * st->enf.admitted;
+        }
+
+        /* The aggregate, summed PER THREAD rather than collapsed onto one
+         * global span -- see the block comment. Each thread contributes its own
+         * capacity, so the C term is threads * C. */
+        agg_supply = (uint64_t)HARNESS_INGRESS_THREADS *
+                         (uint64_t)ADCE_ENF_CAPACITY_Q16 +
+                     ADCE_ENF_RATE_Q16_PER_NS * sum_span;
+        agg_spend += sum_L + sum_tau;
+
+        if (agg_supply != agg_spend) {
+            fprintf(stderr,
+                    "FAIL: concurrent-bucket aggregate: sum(C)+R*sum(span)=%llu"
+                    " but sum(K*A)+sum(L)+sum(tau)=%llu (diff %+lld)\n",
+                    (unsigned long long)agg_supply,
+                    (unsigned long long)agg_spend,
+                    (long long)agg_supply - (long long)agg_spend);
+        }
+        ADCE_TEST_ASSERT(agg_supply == agg_spend);
+
+        printf("  HARNESS concurrent bucket identity HOLDS per thread and in"
+               " aggregate | supply=%llu = K*A + L + tau | sum span=%.3fms"
+               " sum L=%llu (%llu clamps) sum tau=%llu\n",
+               (unsigned long long)agg_supply, (double)sum_span / 1e6,
+               (unsigned long long)sum_L, (unsigned long long)sum_hits,
+               (unsigned long long)sum_tau);
+    }
+
     residual = atomic_load_explicit(&g_h_counter.arrivals, memory_order_relaxed);
     ADCE_TEST_ASSERT(total_tapped ==
                      obs.ctx.arrivals_closed + obs.discarded_arrivals + residual);
