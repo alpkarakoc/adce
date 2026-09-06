@@ -22,6 +22,7 @@
 
 #include "../include/adce_enforce.h"
 
+#include <math.h>
 #include <stdio.h>
 
 #define ADCE_TEST_ASSERT(cond)                                                \
@@ -878,6 +879,261 @@ static int test_loop_step_response_report(void) {
 }
 
 /* =====================================================================
+ * Confronting the section 2B derivation with the code. REPORT ONLY.
+ *
+ * Section 2B claims that on a geometric ramp the EWMA reaches a steady
+ * solution in which z is CONSTANT and independent of the absolute rate, with
+ *
+ *     v = (1-a)a / (1 - (1-a)/(1+g)^2)      and      z = 1/sqrt(v)
+ *
+ * Every number that derivation produces rests on it -- g* = 8.98%, sup z =
+ * 7.178, and through sup z the committed _Static_assert pinning N below 125.
+ * None of it had ever been run against the implementation.
+ *
+ * NOTHING BELOW IS ASSERTED. The only checks are structural, in the shape
+ * t_adce_latency.c uses: that the fixture ran, that the ramp did not overflow,
+ * and that the writer was claimed. No measured value gates the build, because
+ * a threshold on agreement would be a band and this project does not assert
+ * bands.
+ * ===================================================================== */
+
+/* Measurement precision, stated as a requirement with its consequence rather
+ * than chosen: at eps = 1e-5 the comparison resolves z to FIVE significant
+ * figures, which is the precision the predicted values 1.7266 and 4.0560 are
+ * quoted to. A looser eps could not distinguish the last quoted digit; a
+ * tighter one would demand a longer prime than the ramp can represent. */
+#define LOOP_RAMP_EPS 1e-5
+
+#define LOOP_RAMP_MAX_EPOCHS 700u
+
+/* The fixed point of the recurrence the code actually uses:
+ * var = (1-a)*(var + a*d*d), with the (1-a) OUTSIDE the bracket. */
+static double loop_ramp_v_code_form(double g) {
+    const double a = ADCE_OBS_ALPHA;
+    return (1.0 - a) * a / (1.0 - (1.0 - a) / ((1.0 + g) * (1.0 + g)));
+}
+
+/* The fixed point of the OTHER common form, var = (1-a)*var + a*d*d. Computed
+ * so the measurement can discriminate rather than merely agree: the two forms
+ * differ by exactly 1/sqrt(1-a) at EVERY g, so a measurement good to better
+ * than 1% picks one of them outright. */
+static double loop_ramp_v_other_form(double g) {
+    const double a = ADCE_OBS_ALPHA;
+    return a / (1.0 - (1.0 - a) / ((1.0 + g) * (1.0 + g)));
+}
+
+/* PRIME LENGTH, DERIVED. The cold-start transient from mu = var = 0 decays as
+ * (1-a)^k, so reaching a relative error eps takes k = ln(eps)/ln(1-a) epochs.
+ * At a = 2/101 that is ln(eps)/-0.02000067. Closed form, no trajectory
+ * inspected -- which is the whole point, since choosing it by looking at one
+ * would make it the fifth tuned number in this project. */
+static uint32_t loop_ramp_prime_coldstart(double eps) {
+    return (uint32_t)ceil(log(eps) / log(1.0 - ADCE_OBS_ALPHA));
+}
+
+/* The RAMP-SPECIFIC prime, also closed form, and needed because the bound
+ * above is unreachable at large g -- see the overflow note in the report.
+ *
+ * z is a ratio, so what has to decay is the RELATIVE transient, and on a ramp
+ * the signal grows underneath it: the mu error decays as (1-a)^k in absolute
+ * terms but as ((1-a)/(1+g))^k relative to r_k, and the var error faster
+ * still. The prefactor is NOT 1 and dropping it makes the bound too short --
+ * at g = 0.02 the naive form gives 290 epochs where the recurrence needs 306.
+ * The initial relative error is exact rather than observed: mu = var = 0 gives
+ * d_0 = r_0 and var_0 = (1-a)a r_0^2, so z_0 = 1/sqrt((1-a)a) = sup z, and the
+ * prefactor is |z_0/z_inf - 1|. All four terms are closed form. */
+static uint32_t loop_ramp_prime_ramp(double eps, double g) {
+    const double a = ADCE_OBS_ALPHA;
+    double z0 = 1.0 / sqrt((1.0 - a) * a);
+    double zinf = 1.0 / sqrt(loop_ramp_v_code_form(g));
+    double prefactor = fabs(z0 / zinf - 1.0);
+
+    return (uint32_t)ceil(log(eps / prefactor) / log((1.0 - a) / (1.0 + g)));
+}
+
+/* Exactly what n calls to adce_obs_tap would leave behind. The tap is a
+ * relaxed fetch_add and adce_obs_counter_take is an exchange, so the only
+ * thing epoch close ever reads is the total; storing it and accumulating it
+ * are the same value by construction.
+ *
+ * Tapping for real is not an option here, and the number is the reason rather
+ * than the excuse: a geometric ramp at g = 0.02 over 700 epochs offers
+ * 5.24e14 arrivals, about 30 DAYS at the ~5 ns per-arrival cost measured in
+ * docs/enforcement-plane.md section 5. A geometric ramp is structurally unable
+ * to use the per-arrival path at any prime length worth having, which is a
+ * fact about the ramp rather than a shortcut taken here -- and it is a real
+ * constraint on how the document's cases 5 and 6 can ever be built. */
+static void loop_ramp_counter_set(adce_obs_counter_t *counter, uint64_t n) {
+    atomic_store_explicit(&counter->arrivals, n, memory_order_relaxed);
+}
+
+typedef struct {
+    const char *label;
+    double g;
+    uint64_t n0;
+    uint32_t epochs;
+    uint32_t prime;
+} loop_ramp_cfg_t;
+
+/* Drives the real adce_obs_epoch_close down a geometric ramp and, alongside
+ * it, a transcription of that function's arithmetic fed the SAME integer
+ * arrival counts.
+ *
+ * The transcription is NOT an independent implementation and is not offered as
+ * one -- it is the same expressions in the same order. What it establishes is
+ * narrower and still worth having: that the arithmetic is actually REACHED,
+ * with warmup not suppressing it, the sigma floor not clamping, and the
+ * post-update variance being what sqrt() sees. The independent check is the
+ * comparison against the section 2B closed form, which shares no code with
+ * either. */
+static int loop_ramp_run(const loop_ramp_cfg_t *cfg, double *z_code,
+                         double *z_ref, uint64_t *n_last) {
+    static adce_obs_counter_t counter;
+    static adce_epoch_state_t epoch;
+    static adce_obs_ctx_t obs;
+    double mu = 0.0;
+    double var = 0.0;
+    uint32_t k;
+
+    memset(&counter, 0, sizeof(counter));
+    memset(&epoch, 0, sizeof(epoch));
+    adce_obs_init(&obs, &counter, &epoch);
+    if (!adce_obs_claim_writer(&obs)) {
+        return 1;
+    }
+
+    for (k = 0; k < cfg->epochs; k++) {
+        double x = (double)cfg->n0 * pow(1.0 + cfg->g, (double)k);
+        uint64_t n;
+        double rate;
+        double d;
+        double sigma;
+
+        /* Structural: a ramp that overruns the arrival type would measure the
+         * wraparound rather than the recurrence. Headroom below UINT64_MAX so
+         * the +0.5 rounding cannot cross it. */
+        if (!(x < 9.0e18)) {
+            return 2;
+        }
+        n = (uint64_t)(x + 0.5);
+
+        loop_ramp_counter_set(&counter, n);
+        if (adce_obs_epoch_close(&obs, (uint64_t)(k + 1u) *
+                                           ADCE_OBS_EPOCH_NS) < 0) {
+            return 3;
+        }
+        z_code[k] = obs.last_z;
+
+        rate = (double)n / ADCE_OBS_EPOCH_SECONDS;
+        d = rate - mu;
+        mu = mu + ADCE_OBS_ALPHA * d;
+        var = (1.0 - ADCE_OBS_ALPHA) * (var + ADCE_OBS_ALPHA * d * d);
+        sigma = sqrt(var);
+        if (!(sigma >= ADCE_OBS_SIGMA_EPSILON)) {
+            sigma = ADCE_OBS_SIGMA_EPSILON;
+        }
+        z_ref[k] = d / sigma;
+
+        *n_last = n;
+    }
+
+    return 0;
+}
+
+static int test_loop_ramp_fixed_point_report(void) {
+    static double z_code[LOOP_RAMP_MAX_EPOCHS];
+    static double z_ref[LOOP_RAMP_MAX_EPOCHS];
+    /* g = 0.02 primes to the cold-start bound, which it can afford. g = 0.20
+     * cannot: see the report line below. */
+    static const loop_ramp_cfg_t cfgs[2] = {
+        {"g=0.02", 0.02, 10000000u, 700u, 576u},
+        {"g=0.20", 0.20, 1000000u, 140u, 100u}};
+    size_t c;
+
+    printf("  LOOP ramp fixed point -- REPORT ONLY, nothing below is asserted\n");
+    printf("    eps=%.0e -> z resolved to 5 significant figures, the precision"
+           " the predictions are quoted to\n",
+           LOOP_RAMP_EPS);
+    printf("    a=%.10f  ln(1-a)=%.8f  cold-start prime k=ln(eps)/ln(1-a)="
+           "%u epochs\n",
+           ADCE_OBS_ALPHA, log(1.0 - ADCE_OBS_ALPHA),
+           loop_ramp_prime_coldstart(LOOP_RAMP_EPS));
+    printf("    the two candidate recurrences differ by exactly 1/sqrt(1-a)="
+           "%.6f at EVERY g\n",
+           1.0 / sqrt(1.0 - ADCE_OBS_ALPHA));
+
+    for (c = 0; c < sizeof(cfgs) / sizeof(cfgs[0]); c++) {
+        const loop_ramp_cfg_t *cfg = &cfgs[c];
+        double pred_2b = 1.0 / sqrt(loop_ramp_v_code_form(cfg->g));
+        double pred_other = 1.0 / sqrt(loop_ramp_v_other_form(cfg->g));
+        double worst_impl = 0.0;
+        double worst_steady = 0.0;
+        uint32_t worst_at = 0;
+        uint64_t n_last = 0;
+        uint32_t k;
+        int rc;
+
+        rc = loop_ramp_run(cfg, z_code, z_ref, &n_last);
+        ADCE_TEST_ASSERT(rc == 0);
+
+        for (k = 0; k < cfg->epochs; k++) {
+            double impl = fabs(z_code[k] - z_ref[k]) /
+                          (fabs(z_ref[k]) > 0.0 ? fabs(z_ref[k]) : 1.0);
+            if (impl > worst_impl) {
+                worst_impl = impl;
+            }
+            if (k >= cfg->prime) {
+                double dev = fabs(z_code[k] / pred_2b - 1.0);
+                if (dev > worst_steady) {
+                    worst_steady = dev;
+                    worst_at = k;
+                }
+            }
+        }
+
+        printf("\n    %s  n0=%llu epochs=%u prime=%u (derived: cold-start %u,"
+               " ramp-specific %u)  n_last=%.3e\n",
+               cfg->label, (unsigned long long)cfg->n0, cfg->epochs,
+               cfg->prime, loop_ramp_prime_coldstart(LOOP_RAMP_EPS),
+               loop_ramp_prime_ramp(LOOP_RAMP_EPS, cfg->g), (double)n_last);
+        printf("      predicted 2B (code form)   z = %.8f\n", pred_2b);
+        printf("      predicted other recurrence z = %.8f\n", pred_other);
+        printf("      MEASURED steady z          z = %.8f  (epoch %u)\n",
+               z_code[cfg->epochs - 1u], cfg->epochs - 1u);
+        printf("      rel err vs 2B    = %.3e   %s\n",
+               fabs(z_code[cfg->epochs - 1u] / pred_2b - 1.0),
+               fabs(z_code[cfg->epochs - 1u] / pred_2b - 1.0) < LOOP_RAMP_EPS
+                   ? "WITHIN eps"
+                   : "OUTSIDE eps");
+        printf("      rel err vs other = %.3e\n",
+               fabs(z_code[cfg->epochs - 1u] / pred_other - 1.0));
+        printf("      code vs transcribed recurrence, max over ALL %u epochs"
+               " = %.3e\n",
+               cfg->epochs, worst_impl);
+        printf("      WORST deviation from the constant across the whole"
+               " steady window [%u,%u) = %.3e at epoch %u\n",
+               cfg->prime, cfg->epochs, worst_steady, worst_at);
+
+        printf("      epoch-by-epoch:\n");
+        for (k = 0; k < cfg->epochs; k = (k == 0u) ? 1u : k * 2u) {
+            printf("        k=%4u  z=%.8f  rel vs 2B=%+.3e\n", k, z_code[k],
+                   z_code[k] / pred_2b - 1.0);
+        }
+        printf("        k=%4u  z=%.8f  rel vs 2B=%+.3e\n", cfg->epochs - 1u,
+               z_code[cfg->epochs - 1u],
+               z_code[cfg->epochs - 1u] / pred_2b - 1.0);
+    }
+
+    printf("\n    z at epoch 0 from mu=var=0 is %.8f = 1/sqrt((1-a)a) = sup z,"
+           " which is section 7's\n"
+           "    cold-start transient as an exact number rather than the"
+           " approximate 7.18 it quotes.\n",
+           1.0 / sqrt((1.0 - ADCE_OBS_ALPHA) * ADCE_OBS_ALPHA));
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -890,3 +1146,4 @@ ADCE_LOOP_TEST_EXPORT(loop_draw_invariance)
 ADCE_LOOP_TEST_EXPORT(loop_inverted_draw_dependence)
 ADCE_LOOP_TEST_EXPORT(loop_settle_metrics_teeth)
 ADCE_LOOP_TEST_EXPORT(loop_step_response_report)
+ADCE_LOOP_TEST_EXPORT(loop_ramp_fixed_point_report)

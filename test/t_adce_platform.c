@@ -345,6 +345,7 @@ int adce_t_loop_draw_invariance(void);
 int adce_t_loop_inverted_draw_dependence(void);
 int adce_t_loop_settle_metrics_teeth(void);
 int adce_t_loop_step_response_report(void);
+int adce_t_loop_ramp_fixed_point_report(void);
 
 int main(void) {
     struct {
@@ -391,6 +392,7 @@ int main(void) {
         {"loop_inverted_draw_dependence", adce_t_loop_inverted_draw_dependence},
         {"loop_settle_metrics_teeth", adce_t_loop_settle_metrics_teeth},
         {"loop_step_response_report", adce_t_loop_step_response_report},
+        {"loop_ramp_fixed_point_report", adce_t_loop_ramp_fixed_point_report},
     };
 
     int failures = 0;

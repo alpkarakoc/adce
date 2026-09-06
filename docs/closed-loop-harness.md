@@ -155,6 +155,39 @@ Two derived numbers fall out, neither of which is written down anywhere in this 
   common form, `var = (1-a)*var + a*d*d`, gives `1/sqrt(a)` and exactly 127. 125 is this
   codebase's number; 127 would be off by two in the permissive direction.
 
+**CONFRONTED WITH THE CODE, AND CONFIRMED.** `loop_ramp_fixed_point_report` in
+`test/t_adce_loop.c` drives the real `adce_obs_epoch_close` down a geometric ramp past a
+derived prime and reports the measured steady `z`. It asserts nothing.
+
+| g | predicted `1/sqrt(v)` | measured | rel err vs 2B | rel err vs the OTHER recurrence |
+|---|---|---|---|---|
+| 0.02 | 1.72660898 | 1.72660898 | **1.570e-12** | 1.005e-02 |
+| 0.20 | 4.05595335 | 4.05595335 | **5.562e-14** | 1.005e-02 |
+
+Seven to nine orders of magnitude inside the `eps = 1e-5` the prime was derived for. The
+result is not a shared fixed point reached from two lucky points: the worst deviation from
+the constant across the WHOLE steady window is 2.1e-10 at g = 0.02 and 1.5e-10 at g = 0.20.
+`z` really is constant on a geometric ramp, in the implementation and not only in the
+algebra.
+
+It also DISCRIMINATES rather than merely agreeing. The two candidate variance recurrences
+differ by exactly `1/sqrt(1-a) = 1.010051` at every `g`, and the measurement sits 1.005e-2
+away from the other form — so this codebase uses `var = (1-a)*(var + a*d*d)`, `sup z` is
+`1/sqrt((1-a)a)`, and **the committed `_Static_assert` pinning `N` below 125 is pinned to
+the right number.** 127 would have been wrong by two in the permissive direction, and that
+is now measured rather than read.
+
+Two structural facts came out of building the measurement, and both constrain cases 5 and 6:
+
+- **A geometric ramp cannot use the per-arrival path.** The g = 0.02 ramp over 700 epochs
+  offers 5.24e14 arrivals — about 30 DAYS at the ~5 ns gate cost of `enforcement-plane.md`
+  §5. The rig must inject the epoch counter directly, which is exactly what `n` taps leave
+  behind (`adce_obs_tap` is a `fetch_add`, `adce_obs_counter_take` an exchange) but is not
+  the ingress path. Any ramp case is an OBSERVATION-plane case; it cannot exercise the gate.
+- **At large `g` the cold-start prime is unreachable in `uint64`.** 576 epochs at g = 0.20
+  needs `1.2^576 = 4.06e45` arrivals, 26 orders of magnitude past `UINT64_MAX`, even
+  starting from one arrival.
+
 *Shows:* pressure pinned at `ADCE_PRESSURE_MIN` while offered volume grows by two orders of
 magnitude, and the token bucket holding the ceiling alone throughout.
 
@@ -459,12 +492,32 @@ transient is exactly clear of it on a real step.
 6. `loop_ramp_above_threshold` — the same rig at `g = 0.2` (`z = 4.06`, derived): pressure
    leaves `ADCE_PRESSURE_MIN`. Keeps 5 from being vacuous.
 
-Case 5 needs one derivation not yet done: where the steady portion begins. The initial
-condition `mu = var = 0` gives `z = 7.18` at epoch 0 — near saturation — and that transient
-decays as `(1-a)^k`, which is still 0.14 after the 100 warmup epochs. **The prime length
-must be derived from that decay, not chosen by looking at a trajectory**, or case 5 becomes
-the fifth tuned number. The form is: prime until the transient's contribution to `z` is
-below `z_lo` minus the ramp's own steady `z`, with margin.
+Case 5 needed one derivation not yet done: where the steady portion begins. **That
+derivation is now DONE**, in closed form and without inspecting a trajectory, and is
+implemented in `loop_ramp_fixed_point_report`.
+
+The initial condition `mu = var = 0` gives `d_0 = r_0` and `var_0 = (1-a)a r_0^2`, so
+`z_0 = 1/sqrt((1-a)a) = 7.17775745` exactly — the same `sup z` that bounds the ramp family,
+which is a coincidence worth noticing rather than a derivation. Two bounds follow:
+
+- **Cold start:** the absolute transient decays as `(1-a)^k`, so `k = ln(eps)/ln(1-a)`. At
+  `a = 2/101`, `ln(1-a) = -0.02000067`, giving **576 epochs at `eps = 1e-5`** — which
+  resolves `z` to five significant figures, the precision this document quotes its
+  predictions to. `eps` is a measurement-precision requirement with a stated consequence,
+  not a tuning choice.
+- **Ramp-specific**, needed because the bound above is unreachable at large `g`: `z` is a
+  ratio, so what must decay is the RELATIVE transient, and the signal grows underneath it —
+  the `mu` error decays as `((1-a)/(1+g))^k` relative to `r_k`, the `var` error faster.
+  `k = ln(eps / |z_0/z_inf - 1|) / ln((1-a)/(1+g))`, every term closed form. 319 epochs at
+  g = 0.02, 56 at g = 0.20.
+
+**The prefactor is load-bearing and dropping it makes the bound too short.** The naive form
+`ln(eps)/ln((1-a)/(1+g))` gives 290 epochs at g = 0.02 where the recurrence actually needs
+306. And the approach is NOT monotone: `z_k` crosses its own limit at epoch 24 (g = 0.02)
+and epoch 10 (g = 0.20) and then undershoots by 6-7%, so a prime chosen by watching a
+trajectory for "close enough" could stop at the crossing, land on the right value by
+accident, and be wrong a few epochs later. That is the concrete reason this had to be
+derived.
 
 ## Open decisions, deliberately not defaulted
 
