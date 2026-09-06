@@ -346,11 +346,59 @@ looking.
   report-only case is fully correct while its prose says "measured X across n runs" and
   becomes wrong the moment it says "X always".
 
+  **There is a THIRD branch, and it outranks both when it is available: remove the
+  nondeterminism so the quantity becomes assertable.** Branches 1 and 2 take the
+  nondeterminism as given — one gates on it, the other declines to generalise past it. The
+  third dissolves it. The clamp regime is the worked example: it was entered by scheduling
+  luck in one of twenty-five executions, which is why nothing stronger than 24-of-25 could
+  be said about it. Where the rig owns model time the same regime can be CONSTRUCTED, and a
+  constructed regime is exercised on every run on every host, which moves the quantity from
+  branch 2 into branch 1. Reach for this first; fall back to 1, then to 2.
+
   Applied backwards through this document, the entries that already state a figure with its
   n — 0/100 in the fault-injection table, 493-506 across 252 phase-samples, 5 of 400
   real-clock runs, 24 of 25 clamp counts — are in the second branch and stand. Any bare
   universal about a printed quantity is in neither branch and should be read as unsupported
   until it is one or the other.
+
+- **The printed-universal rule CANNOT be gated, and the audit that establishes that is a
+  NEGATIVE result worth recording.** Written down because the natural next move — add a grep
+  to the gate — is wrong, and the reason is a measurement rather than an opinion.
+
+  The rule was grepped across the whole of this document on
+  `\b(always|never|every|exactly|invariably)\b`, which is the widest pattern that could
+  plausibly catch it. **66 lines matched. Zero are violations of the rule as stated.** The
+  breakdown is the finding:
+
+  - structural facts about the code, where the universal is a property of the source and not
+    of a measurement (`aligned to exactly one ADCE_CACHELINE`, `every use routed through
+    them`, `shared by every ingress thread`);
+  - prohibitions and contracts, where the universal is the instruction (`never fold it into
+    a step`, `never asserted`, `never links this TU`);
+  - figures that already carry their n, which is branch 2 working (0/100, 493-506 across 252
+    phase-samples, 0/400, 1600 thread-samples);
+  - quantities that ARE asserted, which is branch 1 working (`aged == 0`);
+  - and prose about the rule itself.
+
+  One near-miss, and it is the audit earning its keep: the `harness_concurrent` entry stated
+  torn reads as "0 under strict and 1-4 under TSan" with no execution count. That is not a
+  banned universal — it is a range — but it is branch 2 with the n missing. Corrected above
+  by saying so rather than by inventing a count.
+
+  **The ratio is the argument.** A grep-based gate on this rule would fire 66 times on an
+  untouched document and roughly that often after any edit, with a true-positive rate of
+  zero and a near-miss rate of one. A gate that cries wolf 66 times gets skipped, and this
+  project has already ruled that a silently-skipping check is worse than one that does not
+  exist. Tightening the pattern does not rescue it: what separates a violation from a false
+  positive is whether the quantity behind the sentence is asserted anywhere, which is a fact
+  about the test suite and not about the sentence, and no regex reaches it.
+
+  So this stays a REVIEW RULE. **A review rule is not a control.** It is maintained by
+  whoever is reading, which is exactly the property this rule was written to condemn in
+  claims — and naming that plainly is the point, because a rule about unenforced claims that
+  quietly presents itself as enforced would be the same defect one level up. Its actual
+  enforcement is branch 3: every quantity moved out of "printed only" is one fewer sentence
+  this rule has to police.
 
 - What that profile is and is not, because overstating it would recreate the problem it
   exists to address. `--cpuset-cpus` confines THIS CONTAINER's threads to two logical CPUs
@@ -552,8 +600,11 @@ looking.
   one `harness_snap_t` per site at the confirmed first publication -- each ingress thread
   snapshotting its OWN site, since main reading a running thread's plain counters is a race no
   seqlock covers -- and asserts the live-phase shape over the delta: `torn + future <=
-  publications + 1` and `aged == 0`. Measured: aged 0 on every thread and every profile, torn 0
-  under strict and 1-4 under TSan against a bound of 32.
+  publications + 1` and `aged == 0`. `aged == 0` is ASSERTED, so that half is maintained by the
+  gate. The torn figures are not: 0 under strict and 1-4 under TSan against a bound of 32,
+  observed over an execution count that was not recorded. Left as the one branch-2 gap the
+  printed-universal audit below turned up — a range without its n — rather than back-filled with
+  a number invented after the fact.
 
   The snapshot cannot perturb `total_tapped == arrivals_closed + discarded + residual`, and the
   argument is structural, not empirical: that identity is about where ARRIVALS go, and a snapshot
