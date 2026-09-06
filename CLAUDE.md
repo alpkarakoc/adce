@@ -251,6 +251,68 @@ looking.
   qemu's. False and meaningless are different defects. It is NOT in `verify.sh`: that gate
   must stay runnable on the development machine, and macOS exposes no affinity API, so a
   pinned profile there could never execute.
+- **The second gate is a CORRECTNESS control for timing-dependent derivations, not only a
+  portability control.** Recorded because #16 is the first case where it caught something
+  `verify.sh` could not, and the reason generalises beyond that commit.
+
+  What happened: #16 extended the bucket conservation identity to the concurrent case, and
+  its first version carried a precondition inherited from the single-threaded rig — that a
+  refill can only clamp after an inter-arrival gap reaching `C/R = 38.3 ms`, on the
+  reasoning that a starved bucket needs that long to refill to capacity. `verify.sh` was
+  GREEN on it across nine executions under `ADCE_REPEAT=3`, all three profiles, and
+  `verify-linux-gcc.sh` was green locally too. `shipping-target` on CI failed it:
+  `diff -401047`, about six admissions' worth.
+
+  The derivation was simply wrong, and wrong in the permissive direction. A refill clamps
+  whenever `tau + R*delta` exceeds `C`, so while the bucket is still near FULL early in a
+  run, a gap of only `(C - tau)/R` clamps — 9.4 us at one admission below capacity, not
+  38 ms — and the harness sleeps 1 ms between batches. The fix measures the discarded
+  amount exactly instead of bounding it, which removed the precondition entirely.
+
+  **What makes this a coverage finding rather than an anecdote is WHY the local gate could
+  not see it.** The bug was not a portability defect: the same source, the same compiler
+  family, the same architecture. It was reachable only on a host whose thread scheduling
+  produced a large enough early gap while the bucket was still near capacity. The
+  development machine is an 8-core M3 whose effective concurrency is already recorded above
+  as NOT KNOWN; the CI runners are 4 vCPU under a different scheduler and a different load.
+  The measured discarded total shows the regime difference directly: 36,169 to 408,345 Q16
+  across eleven local executions, against 27,909 to 3,236,938 across fourteen on CI — an
+  8x wider upper end.
+
+  So the standing claim that `verify.sh` is the gate and `verify-linux-gcc.sh` is the
+  shipping-target check is incomplete. Any assertion whose CORRECTNESS depends on a timing
+  regime — every conservation identity in `t_adce_loop.c` and `t_adce_harness.c` does, via
+  their clamp and staleness preconditions — is only as sound as the widest set of schedules
+  it has been evaluated under. A green local gate on such an assertion is weaker evidence
+  than it looks, and the second gate is where that weakness is currently caught. This does
+  NOT retire the arm64-versus-x86_64 argument recorded above; it adds a second, independent
+  reason the second gate is load-bearing.
+
+- **"Four clamp events per run" is FALSIFIED, and the falsifying observation was already in
+  the run that merged #16.** Recorded because the error is this project's own recurring
+  one, committed again at one remove.
+
+  #16's commit message says the identity held "always over exactly four clamp events — one
+  per thread, the initial full-bucket refill". Four is the structural expectation: each
+  thread's bucket starts full, so its first stage-two arrival necessarily clamps, and under
+  sustained overload the bucket then drains and does not return to capacity. Eleven local
+  executions all showed four. That is a regularity, not a law, and "always" overstates it.
+
+  It is worse than overstated — it is false, and by evidence available at the time. The
+  green `shipping-target` run 34053044909 printed clamp counts for fourteen executions:
+  **thirteen with four clamps and one with five**, alongside a discarded total of 3,236,938
+  Q16, eight times the largest seen locally. Across all twenty-five executions the tally is
+  twenty-four fours and one five. The claim was refuted in a log that was read for PASS or
+  FAIL and not for its numbers.
+
+  Two things follow and neither is about the bucket. A green gate whose output was not read
+  is not evidence for anything the output would have shown — the same failure as the four
+  single observations quoted as rates recorded above, one level up: not a rate quoted from
+  one datum, but a universal quoted from a run of them. And the identity itself never
+  depended on the count: it asserts `C + R*span == K*A + L + tau_final` with L MEASURED, so
+  five clamps are as exact as four. Nothing about the assertion changes; only what may be
+  said about it does.
+
 - What that profile is and is not, because overstating it would recreate the problem it
   exists to address. `--cpuset-cpus` confines THIS CONTAINER's threads to two logical CPUs
   of a larger machine — the container's `nproc` reports 2, echoed into the log as evidence.
