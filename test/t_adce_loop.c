@@ -1746,6 +1746,247 @@ static int test_loop_bucket_closed_form_report(void) {
 }
 
 /* =====================================================================
+ * The conservation equality, ASSERTED.
+ *
+ *     K*A == C + R*(t_last - t_start) - R*delta_0 - tau_final
+ *
+ * Chosen over A == floor((C + R*span)/K) because the confrontation measured
+ * the difference rather than argued it. The floor form needs
+ * L + tau_final < K, and tau_final is effectively uniform over [0,K) from run
+ * to run, so it fails whenever tau_final lands in [K-L, K) -- about L/K of the
+ * time. Over 400 real-clock runs the floor form mismatched 5 times and this
+ * one mismatched zero. The floor form is REPORTED below and never asserted.
+ * ===================================================================== */
+
+/* Returns 0 when the identity holds, 1 otherwise, reporting on stderr the way
+ * every other predicate here does so the teeth fence can cover it.
+ *
+ * THE PRECONDITION FAILS THE CASE, IT DOES NOT SKIP IT. L = R*delta_0 holds
+ * only while no inter-arrival gap refills the bucket from the starved regime
+ * back to capacity, which needs C/R = 38.3 ms. If such a gap occurred the
+ * identity is not the right equation and evaluating it would be meaningless --
+ * but returning "pass" would be worse, because the case would report OK having
+ * checked nothing. This project already ruled that a silently-skipping profile
+ * is worse than one that does not exist; the same holds for a silently-skipping
+ * assertion inside a case that reports OK. So a stall is a RED with the stall
+ * named as the cause.
+ *
+ * That is the same argument that let `aged == 0` be asserted two steps ago.
+ * scripts/verify.sh declines to pin to one core because a starved closer
+ * produces UNATTRIBUTABLE reds; what makes such a red acceptable is
+ * ATTRIBUTION, not a lower bar. The route split prints aged=N beside torn and
+ * future, and this prints gaps_over_capacity beside the identity, for exactly
+ * the same reason: if it goes red on a loaded runner, the output says whether
+ * a host stall or a defect did it. */
+static int loop_bucket_check_identity(const loop_bucket_out_t *o,
+                                      const char *label) {
+    uint64_t span = o->t_last - o->t_start;
+    uint64_t supply;
+    uint64_t deduct;
+    uint64_t lhs;
+
+    if (o->gaps_over_capacity > 0u) {
+        fprintf(stderr,
+                "FAIL: %s IDENTITY NOT EVALUATED -- %llu inter-arrival gap(s)"
+                " reached C/R = %lluns, long enough to refill the bucket to"
+                " capacity, so L = R*delta_0 no longer holds. This is a HOST"
+                " STALL, not a defect in the bucket; max gap seen was"
+                " %lluns.\n",
+                label, (unsigned long long)o->gaps_over_capacity,
+                (unsigned long long)((uint64_t)ADCE_ENF_CAPACITY_Q16 /
+                                     ADCE_ENF_RATE_Q16_PER_NS),
+                (unsigned long long)o->max_gap_ns);
+        return 1;
+    }
+
+    supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 + ADCE_ENF_RATE_Q16_PER_NS * span;
+    deduct = ADCE_ENF_RATE_Q16_PER_NS * o->first_gap_ns + o->tokens_final;
+    lhs = (uint64_t)ADCE_ENF_COST_Q16 * o->admitted;
+
+    /* Unsigned, so an inverted subtraction would wrap into a large positive
+     * value and could compare equal by accident rather than failing. Checked
+     * rather than assumed. */
+    if (deduct > supply) {
+        fprintf(stderr,
+                "FAIL: %s impossible state -- deducted %llu exceeds supply"
+                " %llu\n",
+                label, (unsigned long long)deduct,
+                (unsigned long long)supply);
+        return 1;
+    }
+
+    if (lhs != supply - deduct) {
+        fprintf(stderr,
+                "FAIL: %s conservation broken: K*A=%llu but"
+                " C+R*span-R*d0-tau=%llu (diff %+lld); A=%llu span=%lluns"
+                " d0=%lluns tau=%llu\n",
+                label, (unsigned long long)lhs,
+                (unsigned long long)(supply - deduct),
+                (long long)lhs - (long long)(supply - deduct),
+                (unsigned long long)o->admitted, (unsigned long long)span,
+                (unsigned long long)o->first_gap_ns,
+                (unsigned long long)o->tokens_final);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int test_loop_bucket_conservation(void) {
+    static loop_bucket_out_t syn;
+    static loop_bucket_out_t real;
+    uint64_t syn_supply;
+    uint64_t real_supply;
+
+    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, &syn) == 0);
+    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, &real) == 0);
+
+    /* The derivation's PREMISE, asserted rather than assumed: pressure pinned
+     * at the floor means nothing shed, and every arrival reached stage two.
+     * A stale read would have substituted ADCE_ENF_STALE_PRESSURE and started
+     * shedding, which voids the identity without breaking it -- the failure
+     * would look like a bucket defect and would not be one. */
+    ADCE_TEST_ASSERT(syn.dropped_shed == 0u);
+    ADCE_TEST_ASSERT(real.dropped_shed == 0u);
+    ADCE_TEST_ASSERT(syn.stale_reads == 0u);
+    ADCE_TEST_ASSERT(real.stale_reads == 0u);
+    ADCE_TEST_ASSERT(syn.admitted + syn.dropped_limit == syn.arrivals);
+    ADCE_TEST_ASSERT(real.admitted + real.dropped_limit == real.arrivals);
+
+    /* And that the bucket was actually the binding constraint. Without this
+     * the identity would still hold on an underloaded run, where it says
+     * nothing about a ceiling. */
+    ADCE_TEST_ASSERT(syn.dropped_limit > 0u);
+    ADCE_TEST_ASSERT(real.dropped_limit > 0u);
+
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&syn, "bucket-synthetic") == 0);
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&real, "bucket-real") == 0);
+
+    syn_supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 +
+                 ADCE_ENF_RATE_Q16_PER_NS * (syn.t_last - syn.t_start);
+    real_supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 +
+                  ADCE_ENF_RATE_Q16_PER_NS * (real.t_last - real.t_start);
+
+    printf("  LOOP bucket conservation K*A == C+R*span-R*d0-tau HOLDS\n");
+    printf("    synthetic  A=%llu span=%.3fms d0=%lluns tau=%llu"
+           " | gaps>=C/R=%llu (precondition) max gap=%lluns\n",
+           (unsigned long long)syn.admitted,
+           (double)(syn.t_last - syn.t_start) / 1e6,
+           (unsigned long long)syn.first_gap_ns,
+           (unsigned long long)syn.tokens_final,
+           (unsigned long long)syn.gaps_over_capacity,
+           (unsigned long long)syn.max_gap_ns);
+    printf("    real clock A=%llu span=%.3fms d0=%lluns tau=%llu"
+           " | gaps>=C/R=%llu (precondition) max gap=%lluns\n",
+           (unsigned long long)real.admitted,
+           (double)(real.t_last - real.t_start) / 1e6,
+           (unsigned long long)real.first_gap_ns,
+           (unsigned long long)real.tokens_final,
+           (unsigned long long)real.gaps_over_capacity,
+           (unsigned long long)real.max_gap_ns);
+    /* The floor form, REPORTED and never asserted, with the reason beside it
+     * so a reader does not reach for it later. */
+    printf("    floor form A == floor((C+R*span)/K): synthetic %s, real %s"
+           " -- REPORTED, NOT ASSERTED (needs L+tau<K; mismatched 5 of 400"
+           " real-clock runs, ~L/K)\n",
+           syn.admitted == syn_supply / (uint64_t)ADCE_ENF_COST_Q16
+               ? "holds"
+               : "MISMATCH",
+           real.admitted == real_supply / (uint64_t)ADCE_ENF_COST_Q16
+               ? "holds"
+               : "MISMATCH");
+
+    return 0;
+}
+
+/* Teeth. The mutation that matters -- advancing last_refill_ns only on
+ * admission -- lives in include/adce_enforce.h and is demonstrated against the
+ * real library in a scratch copy rather than here, the same way the N < 125
+ * _Static_assert's teeth were. What is committed is the predicate's own teeth
+ * on fabricated counters: deterministic, timing-free, and covering the one
+ * behaviour a scratch-copy demonstration cannot leave behind in the gate.
+ *
+ * TWO SCRATCH MUTATIONS WERE RUN, and the second is the one that justifies
+ * this case existing at all.
+ *
+ * (a) last_refill_ns advanced only on admission. Every dropped arrival then
+ *     re-adds the interval since the last ADMIT, so the same nanoseconds are
+ *     counted repeatedly and the bucket refills far faster than configured:
+ *     13806 admitted against the correct 8368, a 65% OVER-admission. The
+ *     identity fails loudly -- and so do enf_bucket_ceiling,
+ *     harness_concurrent and harness_stale_posture. Four detectors, so this
+ *     case is confirmatory here rather than unique, and saying otherwise would
+ *     overstate it.
+ *
+ * (b) refill at half the configured rate (elapsed/2). A strict UNDER-admission
+ *     bug: 6232 admitted against 8368, the gate silently throttling 26% more
+ *     traffic than the deployment asked for. **Exactly one test in the entire
+ *     suite catches it, and it is this one.** Every pre-existing ceiling check
+ *     is one-sided -- admitted <= rate*elapsed + capacity -- and an
+ *     under-admitting bucket moves AWAY from that bound, so all of them pass.
+ *
+ * That asymmetry is the whole argument for a two-sided equality over another
+ * inequality, and it was measured rather than asserted. */
+static int test_loop_bucket_identity_teeth(void) {
+    loop_bucket_out_t o;
+
+    fprintf(stderr,
+            "  LOOP bucket teeth BEGIN -- every FAIL line until 'teeth END' is"
+            " EXPECTED;\n"
+            "  loop_bucket_check_identity is the code under test here.\n");
+
+    /* The synthetic arm's own numbers, which satisfy the identity exactly:
+     * K*8368 = 548405248 and C + R*40000000 - R*1000 - 23208 = 548405248. */
+    memset(&o, 0, sizeof(o));
+    o.arrivals = 40000u;
+    o.admitted = 8368u;
+    o.dropped_limit = 31632u;
+    o.t_start = 1000000000u;
+    o.t_last = 1040000000u;
+    o.first_gap_ns = 1000u;
+    o.tokens_final = 23208u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-wellformed") == 0);
+
+    /* ONE admission too many. The identity is an equality, so there is no
+     * threshold below which an extra admission is tolerated. */
+    o.admitted = 8369u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-one-over") == 1);
+
+    /* One too few, so the check is two-sided rather than a ceiling. */
+    o.admitted = 8367u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-one-under") == 1);
+
+    /* THE OVER-ADMISSION SHAPE the last_refill_ns mutation produces. Advancing
+     * only on admission makes every dropped arrival re-add the interval since
+     * the last ADMIT, so the same nanoseconds are counted repeatedly and the
+     * bucket refills far faster than its configured rate. The direction is the
+     * dangerous one -- the ceiling stops holding -- and the identity catches
+     * it because K*A outruns the supply. */
+    o.admitted = 30000u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-over-admit") == 1);
+
+    /* THE PRECONDITION MUST FAIL, NOT SKIP. Identity restored to the
+     * well-formed values, so it WOULD evaluate true -- and the case must still
+     * be rejected, because a run that stalled past C/R was not measuring the
+     * equation the identity states. A predicate that returned 0 here would let
+     * a case report OK having checked nothing. */
+    o.admitted = 8368u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-stall-intact") == 0);
+    o.gaps_over_capacity = 1u;
+    o.max_gap_ns = 40000000u;
+    ADCE_TEST_ASSERT(loop_bucket_check_identity(&o, "teeth-stall-gated") == 1);
+
+    fprintf(stderr,
+            "  LOOP bucket teeth END -- expected failures above."
+            " teeth-stall-intact PASSED with the identity holding and"
+            " gaps_over_capacity=0;\n"
+            "  teeth-stall-gated is the SAME numbers with the stall flag set,"
+            " and it FAILS rather than skipping.\n");
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -1763,3 +2004,5 @@ ADCE_LOOP_TEST_EXPORT(loop_ramp_below_threshold)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_above_threshold)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_teeth)
 ADCE_LOOP_TEST_EXPORT(loop_bucket_closed_form_report)
+ADCE_LOOP_TEST_EXPORT(loop_bucket_conservation)
+ADCE_LOOP_TEST_EXPORT(loop_bucket_identity_teeth)
