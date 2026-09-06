@@ -1559,6 +1559,14 @@ typedef struct {
     uint64_t gaps_over_cost;
     uint64_t gaps_over_capacity;
     uint64_t republishes;
+
+    /* L, and how many refills contributed to it -- recomputed from the values
+     * the refill is about to use, exactly as t_adce_harness.c does. Measured
+     * rather than bounded: the bound this replaced (a gap reaching C/R) was
+     * wrong in the permissive direction, because a refill clamps whenever
+     * tau + R*delta exceeds C and tau is near C early in any run. */
+    uint64_t clamped;
+    uint64_t clamp_hits;
 } loop_bucket_out_t;
 
 static uint64_t loop_bucket_predict(uint64_t t_start, uint64_t t_last) {
@@ -1571,6 +1579,7 @@ static uint64_t loop_bucket_predict(uint64_t t_start, uint64_t t_last) {
  * deliberate: if the two arms diverge, the clock is the only thing that can
  * have caused it. */
 static int loop_bucket_run(int real_clock, uint64_t arrivals, uint64_t step_ns,
+                           uint64_t burst, uint64_t gap_ns,
                            loop_bucket_out_t *out) {
     static adce_epoch_state_t epoch;
     static adce_enf_ctx_t enf;
@@ -1598,7 +1607,22 @@ static int loop_bucket_run(int real_clock, uint64_t arrivals, uint64_t step_ns,
     prev = t0;
 
     for (i = 0; i < arrivals; i++) {
-        uint64_t now = real_clock ? adce_now_ns() : t0 + (i + 1u) * step_ns;
+        /* Flat when burst is 0, otherwise `burst` arrivals at step_ns followed
+         * by a gap of gap_ns -- the batch-then-sleep shape the concurrent
+         * harness runs, reproduced in model time so it happens on every host
+         * rather than when the scheduler allows it. */
+        uint64_t now;
+
+        if (real_clock) {
+            now = adce_now_ns();
+        } else if (burst == 0u) {
+            now = t0 + (i + 1u) * step_ns;
+        } else {
+            uint64_t cycle = i / burst;
+            uint64_t pos = i % burst;
+
+            now = t0 + cycle * (burst * step_ns + gap_ns) + (pos + 1u) * step_ns;
+        }
         uint64_t gap = now > prev ? now - prev : 0u;
 
         if (i == 0u) {
@@ -1624,6 +1648,22 @@ static int loop_bucket_run(int real_clock, uint64_t arrivals, uint64_t step_ns,
             adce_epoch_publish(&epoch, ADCE_PRESSURE_MIN, epoch_id, now);
             last_pub = now;
             out->republishes++;
+        }
+
+        {
+            uint64_t tok_before = enf.tokens_q16;
+            uint64_t refill_before = enf.last_refill_ns;
+            uint64_t el =
+                now > refill_before ? now - refill_before : (uint64_t)0;
+            uint64_t raw = tok_before + ADCE_ENF_RATE_Q16_PER_NS * el;
+
+            /* Pressure is pinned at the floor here, so nothing sheds and every
+             * arrival reaches stage two -- which is what makes this
+             * unconditional rather than needing the verdict first. */
+            if (raw > (uint64_t)ADCE_ENF_CAPACITY_Q16) {
+                out->clamped += raw - (uint64_t)ADCE_ENF_CAPACITY_Q16;
+                out->clamp_hits++;
+            }
         }
 
         /* A VARYING draw, not a fixed one. With pressure at the floor the shed
@@ -1725,13 +1765,13 @@ static int test_loop_bucket_closed_form_report(void) {
 
     /* Synthetic: exact 1 us spacing. Comfortably inside side condition (2)'s
      * 9362 ns and 9.4x over the bucket's sustainable rate. */
-    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, &syn) == 0);
+    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, 0u, 0u, &syn) == 0);
     loop_bucket_report("synthetic", &syn);
 
     /* Real clock, same arrival count scaled up so the REFILL term is
      * comparable to the capacity term rather than swamped by it -- a run too
      * short to refill would confirm only that the bucket starts full. */
-    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, &real) == 0);
+    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, 0u, 0u, &real) == 0);
     loop_bucket_report("real clock", &real);
 
     /* Structural only: the premise held. Zero shed reads means pressure really
@@ -1838,8 +1878,8 @@ static int test_loop_bucket_conservation(void) {
     uint64_t syn_supply;
     uint64_t real_supply;
 
-    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, &syn) == 0);
-    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, &real) == 0);
+    ADCE_TEST_ASSERT(loop_bucket_run(0, 40000u, 1000u, 0u, 0u, &syn) == 0);
+    ADCE_TEST_ASSERT(loop_bucket_run(1, 2000000u, 0u, 0u, 0u, &real) == 0);
 
     /* The derivation's PREMISE, asserted rather than assumed: pressure pinned
      * at the floor means nothing shed, and every arrival reached stage two.
@@ -1987,6 +2027,121 @@ static int test_loop_bucket_identity_teeth(void) {
 }
 
 /* =====================================================================
+ * The CLAMP REGIME, constructed rather than waited for.
+ *
+ * This case exists because of a rule rather than a bug. CLAUDE.md records that
+ * a universal must not be stated about a quantity that is only printed, with
+ * two branches -- assert it, or state a range with its n -- and a third that
+ * outranks both: REMOVE THE NONDETERMINISM so the quantity becomes assertable.
+ * The clamp count was the worked example. It was entered by scheduling luck in
+ * one of twenty-five executions, so nothing stronger than "24 of 25 showed
+ * four" could be said about it.
+ *
+ * Nothing here waits for luck. The synthetic arm owns model time outright --
+ * `now` is computed, never read -- so the regime is CONSTRUCTED and is
+ * exercised on every run on every host, which moves the clamp count from
+ * branch 2 into branch 1.
+ *
+ * THE CONSTRUCTION, derived from the tuning constants rather than tuned. With
+ * `burst` arrivals at `step_ns` followed by a gap of `gap_ns`:
+ *
+ *   - the FIRST arrival of the run sees a full bucket, so any positive gap
+ *     clamps it;
+ *   - within a burst the refill is R*step_ns, which must stay under K or the
+ *     bucket would keep topping out mid-burst: 700 against 65536 here;
+ *   - at each cycle boundary the accumulated gap refill R*(gap_ns + step_ns)
+ *     must exceed the headroom the burst opened,
+ *     burst*K - (burst-1)*R*step_ns: 7,000,700 against 4,150,204 here.
+ *
+ * Exactly one clamp per cycle follows, so the count is LOOP_CLAMP_CYCLES and is
+ * asserted as an equality. The bucket floor is C - burst*K = 264,241,152,
+ * far above zero, so this regime never starves and `dropped_limit` is 0 by
+ * construction. That is deliberate and it is why this case does not replace
+ * `loop_bucket_conservation`: that one runs the bucket to starvation and
+ * exercises the limit path, this one runs it against the CAP. Complementary
+ * halves of the same identity, not a substitute.
+ * ===================================================================== */
+
+#define LOOP_CLAMP_BURST 64u
+#define LOOP_CLAMP_STEP_NS 100u
+#define LOOP_CLAMP_GAP_NS 1000000u
+#define LOOP_CLAMP_CYCLES 200u
+
+/* The two inequalities the construction rests on, checked at compile time so a
+ * retune of the bucket constants cannot silently turn this case into a
+ * different experiment that still passes. */
+_Static_assert(ADCE_ENF_RATE_Q16_PER_NS * LOOP_CLAMP_STEP_NS <
+                   (uint64_t)ADCE_ENF_COST_Q16,
+               "within-burst refill must stay under one cost, or the bucket "
+               "tops out mid-burst and the clamp count is not one per cycle");
+_Static_assert(ADCE_ENF_RATE_Q16_PER_NS *
+                       (LOOP_CLAMP_GAP_NS + LOOP_CLAMP_STEP_NS) >
+                   LOOP_CLAMP_BURST * (uint64_t)ADCE_ENF_COST_Q16,
+               "the gap must refill past the headroom the burst opened, or the "
+               "cycle boundary does not clamp at all");
+
+static int test_loop_bucket_clamp_regime(void) {
+    static loop_bucket_out_t out;
+    uint64_t arrivals = LOOP_CLAMP_BURST * LOOP_CLAMP_CYCLES;
+    uint64_t span;
+    uint64_t supply;
+    uint64_t spend;
+
+    ADCE_TEST_ASSERT(loop_bucket_run(0, arrivals, LOOP_CLAMP_STEP_NS,
+                                     LOOP_CLAMP_BURST, LOOP_CLAMP_GAP_NS,
+                                     &out) == 0);
+
+    /* The premise: pressure pinned at the floor, so every arrival reached
+     * stage two and the bucket is the only thing that acted. */
+    ADCE_TEST_ASSERT(out.dropped_shed == 0u);
+    ADCE_TEST_ASSERT(out.stale_reads == 0u);
+    ADCE_TEST_ASSERT(out.admitted + out.dropped_limit == arrivals);
+
+    /* THE POINT OF THE CASE. The clamp count is derived, not observed: one per
+     * cycle, from the two inequalities asserted above. Branch 1. */
+    ADCE_TEST_ASSERT(out.clamp_hits == LOOP_CLAMP_CYCLES);
+
+    /* And this regime is the cap, not starvation -- stated as an assertion so
+     * a retune that quietly turned it into a starvation run would be caught
+     * rather than silently measuring the other half. */
+    ADCE_TEST_ASSERT(out.dropped_limit == 0u);
+    ADCE_TEST_ASSERT(out.admitted == arrivals);
+
+    /* The identity itself, in the same supply == spend form the concurrent
+     * harness uses, now evaluated in a regime where L is large and repeated
+     * rather than a single initial clamp. */
+    span = out.t_last - out.t_start;
+    supply = (uint64_t)ADCE_ENF_CAPACITY_Q16 + ADCE_ENF_RATE_Q16_PER_NS * span;
+    spend = (uint64_t)ADCE_ENF_COST_Q16 * out.admitted + out.clamped +
+            out.tokens_final;
+
+    if (supply != spend) {
+        fprintf(stderr,
+                "FAIL: clamp-regime conservation broken: C+R*span=%llu but"
+                " K*A+L+tau=%llu (diff %+lld); A=%llu L=%llu clamps=%llu"
+                " tau=%llu\n",
+                (unsigned long long)supply, (unsigned long long)spend,
+                (long long)supply - (long long)spend,
+                (unsigned long long)out.admitted,
+                (unsigned long long)out.clamped,
+                (unsigned long long)out.clamp_hits,
+                (unsigned long long)out.tokens_final);
+    }
+    ADCE_TEST_ASSERT(supply == spend);
+
+    printf("  LOOP clamp regime CONSTRUCTED: %llu cycles of %u arrivals +"
+           " %uns gap | clamps=%llu (asserted == %u) L=%llu admitted=%llu"
+           " limit=%llu | identity holds\n",
+           (unsigned long long)LOOP_CLAMP_CYCLES, LOOP_CLAMP_BURST,
+           LOOP_CLAMP_GAP_NS, (unsigned long long)out.clamp_hits,
+           LOOP_CLAMP_CYCLES, (unsigned long long)out.clamped,
+           (unsigned long long)out.admitted,
+           (unsigned long long)out.dropped_limit);
+
+    return 0;
+}
+
+/* =====================================================================
  * External forwarders; see the header comment.
  * ===================================================================== */
 
@@ -2006,3 +2161,4 @@ ADCE_LOOP_TEST_EXPORT(loop_ramp_teeth)
 ADCE_LOOP_TEST_EXPORT(loop_bucket_closed_form_report)
 ADCE_LOOP_TEST_EXPORT(loop_bucket_conservation)
 ADCE_LOOP_TEST_EXPORT(loop_bucket_identity_teeth)
+ADCE_LOOP_TEST_EXPORT(loop_bucket_clamp_regime)
