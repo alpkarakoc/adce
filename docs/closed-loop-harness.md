@@ -566,6 +566,39 @@ observable. Over the same 400 runs it mismatched **zero** times. **That is the e
 later step should assert.** The floor form would have been an underived number arrived at by
 a different route.
 
+### The conservation equality, asserted
+
+`loop_bucket_conservation` asserts `K*A == C + R*span - R*delta_0 - tau_final` on both a
+synthetic and a real-clock arm, gated on the measured precondition `gaps_over_capacity == 0`.
+
+**A stall fails the case, it does not skip it.** `L = R*delta_0` holds only while no gap
+refills the bucket from starved back to capacity (`C/R = 38.3 ms`). If one did, the identity
+is not the right equation — but returning "pass" would be worse, because the case would
+report OK having checked nothing. This project already ruled that a silently-skipping profile
+is worse than one that does not exist; the same holds for a silently-skipping assertion.
+So a stall is a RED that names the stall, and `gaps_over_capacity` is printed beside the
+identity. That is the same argument that let `aged == 0` be asserted: what makes a red
+acceptable on a loaded runner is ATTRIBUTION, not a lower bar.
+
+Observed headroom is large: under TSan, the slowest profile, the real arm's max inter-arrival
+gap was **14,459 ns against the 38,347,922 ns threshold** — a factor of 2600.
+
+**Why an equality rather than another inequality.** Two mutations were run in scratch copies:
+
+| mutation | effect | caught by |
+|---|---|---|
+| `last_refill_ns` advanced only on admission | 13806 admitted vs 8368 — **65% over**-admission | `loop_bucket_conservation`, `enf_bucket_ceiling`, `harness_concurrent`, `harness_stale_posture` |
+| refill at half rate (`elapsed/2`) | 6232 admitted vs 8368 — **26% under**-admission | **`loop_bucket_conservation` only** |
+
+Every pre-existing ceiling check is one-sided (`admitted <= rate*elapsed + capacity`), and an
+under-admitting bucket moves *away* from that bound, so all of them pass. A gate silently
+throttling a quarter more traffic than the deployment configured is an availability defect
+that nothing in this repository could previously see. That asymmetry is the argument for the
+two-sided form, and it was measured rather than assumed.
+
+The floor form is reported beside the identity and never asserted, with its rejection reason
+inline so nobody reaches for it later.
+
 ### What the teeth had to cover, and what the obvious mutation misses
 
 The natural counterfactual for case 5 is a ramp above `g*`, and it is necessary: it breaks
