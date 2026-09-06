@@ -66,6 +66,75 @@ _Static_assert(ADCE_OBS_Z_HI_INT > ADCE_OBS_Z_LO_INT,
                "z_hi must exceed z_lo: the squash divides by their difference");
 _Static_assert(ADCE_OBS_WINDOW_N > 0, "EWMA window N must be positive");
 
+/* N must stay below 125, and this is the check that makes that enforced rather
+ * than merely written down.
+ *
+ * WHAT IT PINS. On a geometric arrival ramp the EWMA reaches a steady solution
+ * in which z is constant and independent of the absolute rate, and the largest
+ * z any ramp can reach -- the limit as the growth rate goes to infinity -- is
+ *
+ *     sup z = 1 / sqrt((1 - alpha) * alpha)
+ *
+ * At N = 100 that is 7.178, BELOW z_hi. So no exponential ramp at any growth
+ * rate can saturate the squash: the steepest conceivable one caps pressure at
+ * 0.836 of maximum. sup z rises with N, and once it reaches z_hi that stops
+ * being true.
+ *
+ * WHAT BREAKS IF THIS FIRES. A sufficiently steep ramp can then drive pressure
+ * to ADCE_PRESSURE_MAX, and the claim in docs/closed-loop-harness.md 2B that no
+ * ramp at any rate saturates silently stops holding -- silently because nothing
+ * at a call site looks different and no runtime test would notice. Raising N
+ * therefore changes a QUALITATIVE property of the detector, not merely how much
+ * it smooths. That is a decision to take deliberately; this assert is what makes
+ * it impossible to take by accident.
+ *
+ * WHY IT IS INTEGER ARITHMETIC. _Static_assert cannot evaluate a floating
+ * expression, which is the same constraint that makes ADCE_OBS_Z_HI_INT exist
+ * alongside ADCE_OBS_Z_LO_INT. Substituting alpha = 2/(N+1) into sup z < z_hi
+ * clears every denominator:
+ *
+ *     1/sqrt((1-a)a) < z_hi
+ *       <=>  (1-a)a > 1/z_hi^2                 both sides positive
+ *       <=>  2(N-1)/(N+1)^2 > 1/z_hi^2         a = 2/(N+1), 1-a = (N-1)/(N+1)
+ *       <=>  2 * z_hi^2 * (N-1) > (N+1)^2
+ *
+ * which is what is written below. At z_hi = 8 it reads 128(N-1) > (N+1)^2:
+ * N = 124 gives 15744 > 15625 and holds, N = 125 gives 15872 > 15876 and fails.
+ * Written against ADCE_OBS_Z_HI_INT rather than against a literal 128, because a
+ * constant repeated at a use site is exactly how the tuning block above drifts
+ * away from the invariants asserted here without anything failing.
+ *
+ * The supremum is approached and never attained, so the exact condition is
+ * `>=` rather than `>`. It makes no difference: the real crossover is
+ * N = 124.9677, so the two forms select the same integers and there is no
+ * boundary to get wrong by one. The quadratic's other root is near N = 1, and
+ * the assert rejecting N = 1 is also correct -- alpha is then 1, the EWMA has no
+ * memory at all, and sup z is unbounded.
+ *
+ * THIS DEPENDS ON THE VARIANCE RECURRENCE and does not survive changing it.
+ * src/adce_observe.c computes
+ *
+ *     var = (1 - alpha) * (var + alpha * d * d)
+ *
+ * with the (1 - alpha) OUTSIDE the bracket, which is what puts the alpha factor
+ * inside the fixed point and yields sup z = 1/sqrt((1-alpha)*alpha). The other
+ * common form, `var = (1-alpha)*var + alpha*d*d`, yields 1/sqrt(alpha) and a
+ * crossover at exactly 127, not 125. Change the recurrence and this bound is
+ * wrong by two in the PERMISSIVE direction -- it would still compile, and it
+ * would be checking the wrong thing.
+ *
+ * Widened to long long so that an absurd N fails on THIS assert with this
+ * message rather than on an integer overflow in the constant expression, which
+ * would report a fact about arithmetic instead of the constraint. */
+_Static_assert(2LL * ADCE_OBS_Z_HI_INT * ADCE_OBS_Z_HI_INT *
+                       ((long long)ADCE_OBS_WINDOW_N - 1) >
+                   ((long long)ADCE_OBS_WINDOW_N + 1) *
+                       ((long long)ADCE_OBS_WINDOW_N + 1),
+               "N is too large: sup z over geometric ramps reaches z_hi, so a "
+               "steep enough ramp can saturate the squash and the 'no ramp at "
+               "any rate saturates' property is lost (N must be < 125 at "
+               "z_hi = 8; see the derivation above)");
+
 /* ===========================================================================
  * The arrival counter. MANY-writer: every ingress thread taps it.
  *

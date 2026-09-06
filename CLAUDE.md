@@ -497,9 +497,20 @@ looking.
   **125 is the number for this codebase**; 127 belongs to a recurrence it does not use, and
   quoting it would be off by two in the permissive direction.
 
-  Nothing checks this. `adce_observe.h` already carries `_Static_assert`s for the cadence
-  invariant and for `z_hi > z_lo`, so the mechanism exists and this constraint is simply not
-  expressed in it. Adding one is a code change and belongs in its own step.
+  ENFORCED, as of the commit that added this sentence. `adce_observe.h` carries a fourth
+  `_Static_assert` beside the cadence and `z_hi > z_lo` ones, in pure integer arithmetic
+  because `_Static_assert` cannot evaluate a floating expression — the same constraint that
+  makes `ADCE_OBS_Z_HI_INT` exist. Substituting `alpha = 2/(N+1)` into `sup z < z_hi`
+  clears every denominator to `2 * z_hi^2 * (N-1) > (N+1)^2`, which at `z_hi = 8` reads
+  `128(N-1) > (N+1)^2`: 15744 > 15625 at N = 124 and 15872 > 15876 at N = 125. It is
+  written against `ADCE_OBS_Z_HI_INT` rather than a literal 128, so retuning z_hi moves the
+  bound with it.
+
+  Proved to have teeth rather than assumed to: in a scratch copy at N = 125 the strict
+  profile fails at that assert with its own message and the compiler prints
+  `expression evaluates to '15872 > 15876'`; at N = 124 it compiles clean. The assert also
+  rejects N = 1, which is the quadratic's other root and is correct — alpha is 1 there, the
+  EWMA has no memory, and sup z is unbounded.
 
 - Still unverified, in descending order of how much each would change a decision. The
   order changed on 2026-09-05; the reasons are stated per entry rather than left implicit,

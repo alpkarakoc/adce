@@ -132,8 +132,10 @@ Two derived numbers fall out, neither of which is written down anywhere in this 
   squash at all.** The steepest conceivable exponential ramp caps pressure at 0.836 of
   maximum. And this is a property of the current tuning, not of the shape: `sup z` crosses
   `z_hi` at **N = 125**. A future retune of N past 125 silently changes whether a ramp can
-  ever reach full containment. Recorded here because it is invisible at the call site and
-  no test would catch it.
+  ever reach full containment. It is invisible at the call site and no runtime test would
+  catch it, so it is pinned by a `_Static_assert` in `include/adce_observe.h` instead:
+  `2 * z_hi^2 * (N-1) > (N+1)^2`, the same inequality with every denominator cleared, which
+  holds at N = 124 and fails at N = 125.
 
   The crossover depends on which variance recurrence is used, so it was read out of the
   code rather than assumed. `src/adce_observe.c` computes `var = (1-a)*(var + a*d*d)`, with
