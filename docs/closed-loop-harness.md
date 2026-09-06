@@ -1,8 +1,11 @@
 # Closed-loop harness — design
 
-Status: **cases 1-4 of §7 implemented in `test/t_adce_loop.c`; cases 5-6 not.** The
-synthetic rig, the settle metrics and their teeth exist and run in the per-edit gate. The
-ramp cases do not, and §7 says why. This document exists because
+Status: **all of §7 implemented in `test/t_adce_loop.c`.** The synthetic rig, the settle
+metrics and their teeth, the §2B confrontation, and both ramp cases with their
+counterfactuals run in the per-edit gate. Case 5 is narrower than first specified — its
+bucket half is not assertable from a ramp and §7 says why. What remains unbuilt is the
+external loop: the responsive-client patterns of §2E and the real-time arm, both of which
+§5 keeps reportable rather than assertable. This document exists because
 `docs/enforcement-plane.md` §5 and `docs/observation-plane.md` §5 have both listed
 closed-loop behaviour as needing a harness since the planes were written, and it is the
 one item on either list that is a claim about the DESIGN rather than about a function.
@@ -486,11 +489,55 @@ transient is exactly clear of it on a real step.
 4. `loop_settle_metrics_teeth` — `PP`/`TV`/`DC`/`R` on fabricated sequences: square wave
    rejected, monotone decay accepted, and the slow small-variance cycle rejected. No system
    runs; nothing times anything.
-5. `loop_ramp_below_threshold` — geometric ramp at `g = 0.02` (`z = 1.73`, derived):
+5. `loop_ramp_below_threshold` — geometric ramp at `g = 0.02` (`z = 1.7266`, measured):
    pressure stays at `ADCE_PRESSURE_MIN` across the steady portion while offered volume
-   grows 100×, and admitted stays under the bucket ceiling. §1.2, as a number.
-6. `loop_ramp_above_threshold` — the same rig at `g = 0.2` (`z = 4.06`, derived): pressure
-   leaves `ADCE_PRESSURE_MIN`. Keeps 5 from being vacuous.
+   grows 100×. §1.2, as a number. **LANDED, and NARROWED — see below.**
+6. `loop_ramp_above_threshold` — the same rig at `g = 0.2` (`z = 4.0560`, measured):
+   pressure leaves `ADCE_PRESSURE_MIN`. Keeps 5 from being vacuous. **LANDED**, with the
+   added bound that pressure stays strictly BELOW `ADCE_PRESSURE_MAX`, which is §2B's
+   "no ramp at any rate saturates the squash" as a runtime fact rather than an algebraic
+   one.
+7. `loop_ramp_teeth` — the counterfactuals for both. **LANDED.**
+
+### The bucket half of case 5 is deliberately not written
+
+Case 5 above once also asserted "and admitted stays under the bucket ceiling". It does not,
+and the reason is structural rather than an omission.
+
+A geometric ramp **cannot drive the per-arrival path**: the g = 0.02 ramp offers 5.24e14
+arrivals, about 30 days at the ~5 ns gate cost. The counter must be injected, so **the gate
+is not in the loop** for any ramp case. Writing the ceiling half anyway would mean inventing
+a fixture whose only purpose is to make the claim assertable — fitting the evidence to the
+assertion, which is the failure mode this document exists to avoid.
+
+**The narrowing costs nothing, because the two halves belong to two different mechanisms.**
+CLAUDE.md already records the split: the z-score detector is a FAST-TRANSIENT detector only,
+and the token bucket is the sole defence against sustained or slowly-growing load. What a
+ramp demonstrates is *Observation going blind* — which is precisely case 5's pressure half,
+and precisely §1.2's claim. The ceiling claim belongs to the bucket, and it is already
+evidenced by the fixture that can actually run the gate: `test_harness_concurrent` asserts
+`admitted <= rate*elapsed + capacity` per thread under live four-thread load, with measured
+admitted landing within a handful of arrivals of the ceiling. Not unevidenced — evidenced
+elsewhere, by the right instrument.
+
+### What the teeth had to cover, and what the obvious mutation misses
+
+The natural counterfactual for case 5 is a ramp above `g*`, and it is necessary: it breaks
+the pressure half, proving the predicate can tell 8.98%/epoch from 20%/epoch. It is not
+sufficient.
+
+**A FLAT load also holds pressure at `ADCE_PRESSURE_MIN`.** With `g = 0` the deviation goes
+to zero, sigma falls to the epsilon floor, `z` goes to zero, and pressure sits at the floor
+with nothing growing anywhere — so case 5's pressure half is satisfied by a rig that has
+stopped. Measured: a flat load at the same `n0` and epoch count PASSES `loop_ramp_check_floor`
+outright.
+
+So case 5's content is not "pressure at MIN" but "pressure at MIN **while offered volume
+grew**", and the growth is therefore ASSERTED rather than described. `loop_ramp_teeth`
+carries both mutations: `g` above `g*` rejected by the floor predicate, and `g = 0` rejected
+by the growth predicate while passing the floor one. That second region — where the pressure
+predicate cannot see the defect at all — is the same shape as `0 < aged <= bound` was for the
+summed stale bound.
 
 Case 5 needed one derivation not yet done: where the steady portion begins. **That
 derivation is now DONE**, in closed form and without inspecting a trajectory, and is

@@ -975,6 +975,36 @@ typedef struct {
     uint32_t prime;
 } loop_ramp_cfg_t;
 
+/* One run's worth of output. Carries the PUBLISHED pressure as well as z,
+ * because cases 5 and 6 are claims about what Enforcement would read, not
+ * about the statistic: the squash and the publication clamp sit between them,
+ * and warmup suppresses publication entirely for the first
+ * ADCE_OBS_WARMUP_EPOCHS. Asserting on z would skip all three. */
+typedef struct {
+    double z_code[LOOP_RAMP_MAX_EPOCHS];
+    double z_ref[LOOP_RAMP_MAX_EPOCHS];
+    adce_q16_t pressure[LOOP_RAMP_MAX_EPOCHS];
+    uint64_t n[LOOP_RAMP_MAX_EPOCHS];
+    uint64_t publications;
+    uint64_t last_epoch_id;
+} loop_ramp_out_t;
+
+/* The two ramps, defined once and shared by the report and by cases 5 and 6,
+ * so the configuration a number was measured under cannot drift away from the
+ * configuration it is asserted under.
+ *
+ * g = 0.02 is well below g* ~ 0.0898 (z = 1.7266, under z_lo = 3); g = 0.20 is
+ * well above it (z = 4.0560, between z_lo and z_hi). Both are the document's
+ * own choices and both are now measured, not predicted.
+ *
+ * The epoch counts are set by what the arrival type can hold, not by taste:
+ * at g = 0.20 with n0 = 1e6 the count passes UINT64_MAX at epoch 168, so 160
+ * is the last round number that fits with headroom. */
+static const loop_ramp_cfg_t loop_ramp_below = {"g=0.02", 0.02, 10000000u,
+                                                700u, 576u};
+static const loop_ramp_cfg_t loop_ramp_above = {"g=0.20", 0.20, 1000000u,
+                                                160u, 100u};
+
 /* Drives the real adce_obs_epoch_close down a geometric ramp and, alongside
  * it, a transcription of that function's arithmetic fed the SAME integer
  * arrival counts.
@@ -986,8 +1016,7 @@ typedef struct {
  * post-update variance being what sqrt() sees. The independent check is the
  * comparison against the section 2B closed form, which shares no code with
  * either. */
-static int loop_ramp_run(const loop_ramp_cfg_t *cfg, double *z_code,
-                         double *z_ref, uint64_t *n_last) {
+static int loop_ramp_run(const loop_ramp_cfg_t *cfg, loop_ramp_out_t *out) {
     static adce_obs_counter_t counter;
     static adce_epoch_state_t epoch;
     static adce_obs_ctx_t obs;
@@ -995,6 +1024,11 @@ static int loop_ramp_run(const loop_ramp_cfg_t *cfg, double *z_code,
     double var = 0.0;
     uint32_t k;
 
+    if (cfg->epochs > LOOP_RAMP_MAX_EPOCHS) {
+        return 4;
+    }
+
+    memset(out, 0, sizeof(*out));
     memset(&counter, 0, sizeof(counter));
     memset(&epoch, 0, sizeof(epoch));
     adce_obs_init(&obs, &counter, &epoch);
@@ -1022,7 +1056,24 @@ static int loop_ramp_run(const loop_ramp_cfg_t *cfg, double *z_code,
                                            ADCE_OBS_EPOCH_NS) < 0) {
             return 3;
         }
-        z_code[k] = obs.last_z;
+        out->z_code[k] = obs.last_z;
+        out->n[k] = n;
+
+        /* The published value, read back through the same seqlock Enforcement
+         * would use. Single-threaded, so it cannot tear; before the first
+         * publication it returns the zeroed state, which IS the published
+         * value there -- warmup publishes nothing and that is the design. */
+        {
+            adce_q16_t p = 0;
+            uint64_t id = 0;
+            uint64_t at = 0;
+
+            if (!adce_epoch_read(&epoch, &p, &id, &at)) {
+                return 5;
+            }
+            out->pressure[k] = p;
+            out->last_epoch_id = id;
+        }
 
         rate = (double)n / ADCE_OBS_EPOCH_SECONDS;
         d = rate - mu;
@@ -1032,22 +1083,18 @@ static int loop_ramp_run(const loop_ramp_cfg_t *cfg, double *z_code,
         if (!(sigma >= ADCE_OBS_SIGMA_EPSILON)) {
             sigma = ADCE_OBS_SIGMA_EPSILON;
         }
-        z_ref[k] = d / sigma;
-
-        *n_last = n;
+        out->z_ref[k] = d / sigma;
     }
 
+    out->publications = obs.publications;
     return 0;
 }
 
 static int test_loop_ramp_fixed_point_report(void) {
-    static double z_code[LOOP_RAMP_MAX_EPOCHS];
-    static double z_ref[LOOP_RAMP_MAX_EPOCHS];
+    static loop_ramp_out_t out;
     /* g = 0.02 primes to the cold-start bound, which it can afford. g = 0.20
      * cannot: see the report line below. */
-    static const loop_ramp_cfg_t cfgs[2] = {
-        {"g=0.02", 0.02, 10000000u, 700u, 576u},
-        {"g=0.20", 0.20, 1000000u, 140u, 100u}};
+    const loop_ramp_cfg_t *cfgs[2] = {&loop_ramp_below, &loop_ramp_above};
     size_t c;
 
     printf("  LOOP ramp fixed point -- REPORT ONLY, nothing below is asserted\n");
@@ -1063,7 +1110,7 @@ static int test_loop_ramp_fixed_point_report(void) {
            1.0 / sqrt(1.0 - ADCE_OBS_ALPHA));
 
     for (c = 0; c < sizeof(cfgs) / sizeof(cfgs[0]); c++) {
-        const loop_ramp_cfg_t *cfg = &cfgs[c];
+        const loop_ramp_cfg_t *cfg = cfgs[c];
         double pred_2b = 1.0 / sqrt(loop_ramp_v_code_form(cfg->g));
         double pred_other = 1.0 / sqrt(loop_ramp_v_other_form(cfg->g));
         double worst_impl = 0.0;
@@ -1073,17 +1120,18 @@ static int test_loop_ramp_fixed_point_report(void) {
         uint32_t k;
         int rc;
 
-        rc = loop_ramp_run(cfg, z_code, z_ref, &n_last);
+        rc = loop_ramp_run(cfg, &out);
         ADCE_TEST_ASSERT(rc == 0);
+        n_last = out.n[cfg->epochs - 1u];
 
         for (k = 0; k < cfg->epochs; k++) {
-            double impl = fabs(z_code[k] - z_ref[k]) /
-                          (fabs(z_ref[k]) > 0.0 ? fabs(z_ref[k]) : 1.0);
+            double impl = fabs(out.z_code[k] - out.z_ref[k]) /
+                          (fabs(out.z_ref[k]) > 0.0 ? fabs(out.z_ref[k]) : 1.0);
             if (impl > worst_impl) {
                 worst_impl = impl;
             }
             if (k >= cfg->prime) {
-                double dev = fabs(z_code[k] / pred_2b - 1.0);
+                double dev = fabs(out.z_code[k] / pred_2b - 1.0);
                 if (dev > worst_steady) {
                     worst_steady = dev;
                     worst_at = k;
@@ -1099,14 +1147,14 @@ static int test_loop_ramp_fixed_point_report(void) {
         printf("      predicted 2B (code form)   z = %.8f\n", pred_2b);
         printf("      predicted other recurrence z = %.8f\n", pred_other);
         printf("      MEASURED steady z          z = %.8f  (epoch %u)\n",
-               z_code[cfg->epochs - 1u], cfg->epochs - 1u);
+               out.z_code[cfg->epochs - 1u], cfg->epochs - 1u);
         printf("      rel err vs 2B    = %.3e   %s\n",
-               fabs(z_code[cfg->epochs - 1u] / pred_2b - 1.0),
-               fabs(z_code[cfg->epochs - 1u] / pred_2b - 1.0) < LOOP_RAMP_EPS
+               fabs(out.z_code[cfg->epochs - 1u] / pred_2b - 1.0),
+               fabs(out.z_code[cfg->epochs - 1u] / pred_2b - 1.0) < LOOP_RAMP_EPS
                    ? "WITHIN eps"
                    : "OUTSIDE eps");
         printf("      rel err vs other = %.3e\n",
-               fabs(z_code[cfg->epochs - 1u] / pred_other - 1.0));
+               fabs(out.z_code[cfg->epochs - 1u] / pred_other - 1.0));
         printf("      code vs transcribed recurrence, max over ALL %u epochs"
                " = %.3e\n",
                cfg->epochs, worst_impl);
@@ -1116,12 +1164,12 @@ static int test_loop_ramp_fixed_point_report(void) {
 
         printf("      epoch-by-epoch:\n");
         for (k = 0; k < cfg->epochs; k = (k == 0u) ? 1u : k * 2u) {
-            printf("        k=%4u  z=%.8f  rel vs 2B=%+.3e\n", k, z_code[k],
-                   z_code[k] / pred_2b - 1.0);
+            printf("        k=%4u  z=%.8f  rel vs 2B=%+.3e\n", k, out.z_code[k],
+                   out.z_code[k] / pred_2b - 1.0);
         }
         printf("        k=%4u  z=%.8f  rel vs 2B=%+.3e\n", cfg->epochs - 1u,
-               z_code[cfg->epochs - 1u],
-               z_code[cfg->epochs - 1u] / pred_2b - 1.0);
+               out.z_code[cfg->epochs - 1u],
+               out.z_code[cfg->epochs - 1u] / pred_2b - 1.0);
     }
 
     printf("\n    z at epoch 0 from mu=var=0 is %.8f = 1/sqrt((1-a)a) = sup z,"
@@ -1129,6 +1177,261 @@ static int test_loop_ramp_fixed_point_report(void) {
            "    cold-start transient as an exact number rather than the"
            " approximate 7.18 it quotes.\n",
            1.0 / sqrt((1.0 - ADCE_OBS_ALPHA) * ADCE_OBS_ALPHA));
+
+    return 0;
+}
+
+/* =====================================================================
+ * Cases 5 and 6 -- the ramp, as assertions.
+ *
+ * SCOPE, and why it is narrower than docs/closed-loop-harness.md section 7
+ * originally specified. Case 5 there asserts two things: that pressure stays
+ * at ADCE_PRESSURE_MIN across the ramp, AND that admitted stays under the
+ * bucket ceiling. Only the first is written here.
+ *
+ * The reason is structural and was measured rather than guessed. A geometric
+ * ramp cannot drive the per-arrival path at all -- the g = 0.02 ramp offers
+ * 5.24e14 arrivals, about 30 days at the ~5 ns gate cost -- so the counter is
+ * injected and THE GATE IS NOT IN THE LOOP. Writing the ceiling half anyway
+ * would mean inventing a fixture whose only purpose is to make the claim
+ * assertable, which is fitting the evidence to the assertion.
+ *
+ * The narrowing costs nothing, because the two halves belong to two different
+ * mechanisms and CLAUDE.md already records the split: the z-score detector is
+ * a FAST-TRANSIENT detector only, and the token bucket is the sole defence
+ * against sustained or slowly-growing load. What a ramp demonstrates is
+ * OBSERVATION GOING BLIND -- which is exactly case 5's pressure half. The
+ * ceiling claim belongs to the bucket, and it is already evidenced elsewhere:
+ * test_harness_concurrent asserts admitted <= rate*elapsed + capacity per
+ * thread under live four-thread load, with the measured admitted sitting
+ * within a handful of arrivals of the ceiling. Not unevidenced -- evidenced by
+ * the fixture that can actually run the gate.
+ * ===================================================================== */
+
+/* Case 5's predicate. Returns 0 when pressure is pinned at ADCE_PRESSURE_MIN
+ * across [lo, hi), 1 otherwise, reporting on stderr the way every other
+ * predicate in this project reports so the teeth fence can cover it. */
+static int loop_ramp_check_floor(const loop_ramp_out_t *out, uint32_t lo,
+                                 uint32_t hi, const char *label) {
+    uint32_t k;
+
+    for (k = lo; k < hi; k++) {
+        if (out->pressure[k] != ADCE_PRESSURE_MIN) {
+            fprintf(stderr,
+                    "FAIL: %s pressure left the floor at epoch %u: %lld"
+                    " (expected %lld)\n",
+                    label, k, (long long)out->pressure[k],
+                    (long long)ADCE_PRESSURE_MIN);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Case 6's predicate: the mirror. */
+static int loop_ramp_check_lifted(const loop_ramp_out_t *out, uint32_t lo,
+                                  uint32_t hi, const char *label) {
+    uint32_t k;
+
+    for (k = lo; k < hi; k++) {
+        if (out->pressure[k] <= ADCE_PRESSURE_MIN) {
+            fprintf(stderr,
+                    "FAIL: %s pressure did not leave the floor at epoch %u:"
+                    " %lld\n",
+                    label, k, (long long)out->pressure[k]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The OTHER half of case 5, and the half that carries its whole content.
+ *
+ * "Pressure stays at ADCE_PRESSURE_MIN" is satisfied trivially by a system
+ * under no load at all: a FLAT arrival sequence drives d to zero, sigma to the
+ * epsilon floor and z to zero, so pressure sits at MIN with nothing growing
+ * anywhere. The claim worth asserting is that pressure stays at MIN WHILE
+ * OFFERED VOLUME GROWS, so the growth is asserted rather than described --
+ * otherwise case 5 would pass on a rig that had stopped. */
+static int loop_ramp_check_growth(const loop_ramp_out_t *out, uint32_t lo,
+                                  uint32_t hi, uint64_t factor,
+                                  const char *label) {
+    uint64_t first;
+    uint64_t last;
+
+    if (hi <= lo) {
+        fprintf(stderr, "FAIL: %s empty window [%u,%u)\n", label, lo, hi);
+        return 1;
+    }
+    first = out->n[lo];
+    last = out->n[hi - 1u];
+
+    if (first == 0u || last / first < factor) {
+        fprintf(stderr,
+                "FAIL: %s offered volume grew %llux over [%u,%u), needed"
+                " %llux (%llu -> %llu)\n",
+                label, (unsigned long long)(first ? last / first : 0u), lo, hi,
+                (unsigned long long)factor, (unsigned long long)first,
+                (unsigned long long)last);
+        return 1;
+    }
+    return 0;
+}
+
+/* The window both cases assert over. It opens at the DERIVED prime, and at
+ * warmup's end when that is later -- there is no published pressure before the
+ * first publication, so a window opening earlier would be reading the zeroed
+ * epoch state and calling it evidence.
+ *
+ * The prime is the PREFACTOR-CORRECTED ramp-specific length,
+ * ln(eps/|z_0/z_inf - 1|)/ln((1-a)/(1+g)) -- 319 epochs at g = 0.02, 56 at
+ * g = 0.20. Not the naive ln(eps)/ln((1-a)/(1+g)), which drops the prefactor
+ * and gives 290 at g = 0.02 where the recurrence measurably needs 306: too
+ * short, and short in the direction that would let a still-decaying transient
+ * be asserted on as if it were the steady state. And not the cold-start bound
+ * of 576 either, which is correct but unreachable at g = 0.20 -- priming that
+ * long there needs 1.2^576 = 4.06e45 arrivals, 26 orders past UINT64_MAX. One
+ * bound has to serve both cases, and this is the one that does. */
+static uint32_t loop_ramp_window_lo(double g) {
+    uint32_t prime = loop_ramp_prime_ramp(LOOP_RAMP_EPS, g);
+
+    return prime > (uint32_t)ADCE_OBS_WARMUP_EPOCHS
+               ? prime
+               : (uint32_t)ADCE_OBS_WARMUP_EPOCHS;
+}
+
+/* Case 5. A ramp well below g* holds pressure at the floor while offered
+ * volume grows without bound -- section 1.2's claim as an executed fact. */
+static int test_loop_ramp_below_threshold(void) {
+    static loop_ramp_out_t out;
+    const loop_ramp_cfg_t *cfg = &loop_ramp_below;
+    uint32_t lo = loop_ramp_window_lo(cfg->g);
+    uint32_t hi = cfg->epochs;
+
+    ADCE_TEST_ASSERT(loop_ramp_run(cfg, &out) == 0);
+
+    /* Liveness, so "pressure is at MIN" cannot be satisfied by an observer
+     * that never published or an epoch state that was never written. Without
+     * this the floor predicate would pass on a frozen rig. */
+    ADCE_TEST_ASSERT(out.publications == cfg->epochs - ADCE_OBS_WARMUP_EPOCHS + 1u);
+    ADCE_TEST_ASSERT(out.last_epoch_id == cfg->epochs);
+
+    ADCE_TEST_ASSERT(loop_ramp_check_floor(&out, lo, hi, "ramp-below") == 0);
+    ADCE_TEST_ASSERT(loop_ramp_check_growth(&out, lo, hi, 100u,
+                                            "ramp-below") == 0);
+
+    printf("  LOOP ramp below g* (%s) window [%u,%u) prime=%u: pressure pinned"
+           " at %lld while offered volume grew %llux (%llu -> %llu per epoch),"
+           " z=%.6f\n",
+           cfg->label, lo, hi, loop_ramp_prime_ramp(LOOP_RAMP_EPS, cfg->g),
+           (long long)ADCE_PRESSURE_MIN,
+           (unsigned long long)(out.n[hi - 1u] / out.n[lo]),
+           (unsigned long long)out.n[lo], (unsigned long long)out.n[hi - 1u],
+           out.z_code[hi - 1u]);
+
+    return 0;
+}
+
+/* Case 6. The same rig above g*, which is what stops case 5 being a statement
+ * about a detector that never fires at all. */
+static int test_loop_ramp_above_threshold(void) {
+    static loop_ramp_out_t out;
+    const loop_ramp_cfg_t *cfg = &loop_ramp_above;
+    uint32_t lo = loop_ramp_window_lo(cfg->g);
+    uint32_t hi = cfg->epochs;
+
+    ADCE_TEST_ASSERT(loop_ramp_run(cfg, &out) == 0);
+
+    ADCE_TEST_ASSERT(out.publications == cfg->epochs - ADCE_OBS_WARMUP_EPOCHS + 1u);
+    ADCE_TEST_ASSERT(out.last_epoch_id == cfg->epochs);
+
+    ADCE_TEST_ASSERT(loop_ramp_check_lifted(&out, lo, hi, "ramp-above") == 0);
+
+    /* Below the clamp as well as above the floor. Section 2B's sup z is 7.178
+     * against z_hi = 8, so NO ramp at any growth rate can saturate the squash;
+     * a pressure of exactly ADCE_PRESSURE_MAX here would mean that property
+     * had failed, and it is the property the committed N < 125 _Static_assert
+     * exists to protect. Asserting the bound rather than the value, because
+     * the value is a measurement. */
+    ADCE_TEST_ASSERT(out.pressure[hi - 1u] < ADCE_PRESSURE_MAX);
+
+    printf("  LOOP ramp above g* (%s) window [%u,%u) prime=%u: pressure lifted"
+           " to %lld of %lld (z=%.6f, sup z=%.4f < z_hi=%d so the squash"
+           " cannot saturate)\n",
+           cfg->label, lo, hi, loop_ramp_prime_ramp(LOOP_RAMP_EPS, cfg->g),
+           (long long)out.pressure[hi - 1u], (long long)ADCE_PRESSURE_MAX,
+           out.z_code[hi - 1u],
+           1.0 / sqrt((1.0 - ADCE_OBS_ALPHA) * ADCE_OBS_ALPHA),
+           ADCE_OBS_Z_HI_INT);
+
+    return 0;
+}
+
+/* The teeth for both, in the shape test_harness_stale_split_teeth established:
+ * feed each predicate the data that must break it, and observe the rejection.
+ *
+ * TWO mutations, not one, because the obvious mutation does not close case 5's
+ * actual hole. A ramp above g* breaks the PRESSURE half and is the natural
+ * counterfactual -- but a FLAT load also holds pressure at the floor, with no
+ * growth at all, so the pressure half alone is satisfied by a system doing
+ * nothing. The growth half is what distinguishes a ramp from a stopped rig,
+ * and it needs its own mutation to show it has teeth. */
+static int test_loop_ramp_teeth(void) {
+    static loop_ramp_out_t below;
+    static loop_ramp_out_t above;
+    static loop_ramp_out_t flat;
+    /* Same n0 and epoch count as the below-threshold ramp, g = 0 exactly. */
+    static const loop_ramp_cfg_t cfg_flat = {"g=0.00", 0.0, 10000000u, 700u,
+                                             576u};
+    uint32_t lo_b = loop_ramp_window_lo(loop_ramp_below.g);
+    uint32_t lo_a = loop_ramp_window_lo(loop_ramp_above.g);
+
+    fprintf(stderr,
+            "  LOOP ramp teeth BEGIN -- every FAIL line until 'teeth END' is"
+            " EXPECTED;\n"
+            "  loop_ramp_check_floor / _lifted / _growth are the code under"
+            " test here.\n");
+
+    ADCE_TEST_ASSERT(loop_ramp_run(&loop_ramp_below, &below) == 0);
+    ADCE_TEST_ASSERT(loop_ramp_run(&loop_ramp_above, &above) == 0);
+    ADCE_TEST_ASSERT(loop_ramp_run(&cfg_flat, &flat) == 0);
+
+    /* 1. Case 5's floor predicate, fed the above-threshold ramp. Must reject:
+     *    if it did not, case 5 would be passing on a detector that cannot
+     *    tell 8.98%/epoch growth from 20%/epoch growth. */
+    ADCE_TEST_ASSERT(
+        loop_ramp_check_floor(&above, lo_a, loop_ramp_above.epochs,
+                              "teeth-floor-vs-above") == 1);
+
+    /* 2. Case 6's lifted predicate, fed the below-threshold ramp. The mirror,
+     *    and it is what stops case 6 passing on a detector stuck high. */
+    ADCE_TEST_ASSERT(
+        loop_ramp_check_lifted(&below, lo_b, loop_ramp_below.epochs,
+                               "teeth-lifted-vs-below") == 1);
+
+    /* 3. THE HOLE THE OBVIOUS MUTATION MISSES. A flat load passes case 5's
+     *    floor predicate outright -- pressure never leaves MIN, because there
+     *    is nothing to detect. Only the growth half rejects it. This is the
+     *    region where the weaker predicate cannot see the defect at all, the
+     *    same shape as 0 < aged <= bound was for the summed stale bound. */
+    ADCE_TEST_ASSERT(loop_ramp_check_floor(&flat, lo_b, cfg_flat.epochs,
+                                           "teeth-flat-passes-floor") == 0);
+    ADCE_TEST_ASSERT(loop_ramp_check_growth(&flat, lo_b, cfg_flat.epochs, 100u,
+                                            "teeth-flat-vs-growth") == 1);
+
+    /* 4. And the growth predicate must not reject the real ramp, or it would
+     *    be rejecting everything rather than discriminating. */
+    ADCE_TEST_ASSERT(loop_ramp_check_growth(&below, lo_b,
+                                            loop_ramp_below.epochs, 100u,
+                                            "teeth-growth-vs-below") == 0);
+
+    fprintf(stderr,
+            "  LOOP ramp teeth END -- expected failures above. Flat load"
+            " pressure at epoch %u is %lld, which PASSES the floor predicate"
+            " and is\n"
+            "  why case 5 asserts growth as well.\n",
+            cfg_flat.epochs - 1u,
+            (long long)flat.pressure[cfg_flat.epochs - 1u]);
 
     return 0;
 }
@@ -1147,3 +1450,6 @@ ADCE_LOOP_TEST_EXPORT(loop_inverted_draw_dependence)
 ADCE_LOOP_TEST_EXPORT(loop_settle_metrics_teeth)
 ADCE_LOOP_TEST_EXPORT(loop_step_response_report)
 ADCE_LOOP_TEST_EXPORT(loop_ramp_fixed_point_report)
+ADCE_LOOP_TEST_EXPORT(loop_ramp_below_threshold)
+ADCE_LOOP_TEST_EXPORT(loop_ramp_above_threshold)
+ADCE_LOOP_TEST_EXPORT(loop_ramp_teeth)
