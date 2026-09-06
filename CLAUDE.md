@@ -305,13 +305,52 @@ looking.
   twenty-four fours and one five. The claim was refuted in a log that was read for PASS or
   FAIL and not for its numbers.
 
-  Two things follow and neither is about the bucket. A green gate whose output was not read
-  is not evidence for anything the output would have shown — the same failure as the four
-  single observations quoted as rates recorded above, one level up: not a rate quoted from
-  one datum, but a universal quoted from a run of them. And the identity itself never
-  depended on the count: it asserts `C + R*span == K*A + L + tau_final` with L MEASURED, so
-  five clamps are as exact as four. Nothing about the assertion changes; only what may be
-  said about it does.
+  One thing follows that is not about the bucket, and it is the rule below rather than the
+  reading failure this entry first blamed. **"The log was read for PASS or FAIL and not for
+  its numbers" is the symptom, not the cause**, and stating it as the cause was wrong in a
+  way worth correcting: it makes the defence proportional to attention. The claim was about
+  a quantity nothing checked, so no amount of care would have kept it true as hosts changed
+  — care catches the instance, and only a check catches the class.
+
+  The identity itself never depended on the count: it asserts
+  `C + R*span == K*A + L + tau_final` with L MEASURED, so five clamps are as exact as four.
+  Nothing about the assertion changes; only what may be said about it does.
+
+- **PRINTED IS NOT CHECKED. Do not state a universal about a quantity that is only
+  printed.** The generalisation of the clamp-count finding above, and the rule that replaces
+  its first diagnosis.
+
+  A number a test prints has no gate behind it by construction. Nothing fails when it
+  changes, so a universal asserted about it — "always", "never", "exactly N" — is
+  unfalsifiable by the gate and drifts silently as hosts, core counts and schedulers move
+  underneath it. That is precisely how "always over exactly four clamp events" survived
+  into a commit message while a run in the same PR printed five.
+
+  **The remedy has exactly two branches and no third.** Either
+
+  1. ASSERT it, at which point the gate is the check and the claim is maintained by the
+     thing that would go red; or
+  2. say nothing stronger than **a range with its observation count beside it** — "24 of 25
+     executions showed four, one showed five", not "always four".
+
+  Anything between the two is a claim maintained by whoever last looked, which is the same
+  defect this project already records for a silently-skipping profile: the problem is the
+  ABSENCE OF A CHECK, not the absence of vigilance.
+
+  **This does NOT mean assert everything printed, and reading it that way would break the
+  design on purpose.** `t_adce_latency.c`, `loop_ramp_fixed_point_report`,
+  `loop_bucket_closed_form_report` and `loop_step_response_report` deliberately measure
+  without asserting, because a threshold on those numbers would be a band with no
+  derivation — the failure mode this list exists to prevent. Reporting a measurement and
+  claiming a law about it are different acts, and only the second is forbidden here. A
+  report-only case is fully correct while its prose says "measured X across n runs" and
+  becomes wrong the moment it says "X always".
+
+  Applied backwards through this document, the entries that already state a figure with its
+  n — 0/100 in the fault-injection table, 493-506 across 252 phase-samples, 5 of 400
+  real-clock runs, 24 of 25 clamp counts — are in the second branch and stand. Any bare
+  universal about a printed quantity is in neither branch and should be read as unsupported
+  until it is one or the other.
 
 - What that profile is and is not, because overstating it would recreate the problem it
   exists to address. `--cpuset-cpus` confines THIS CONTAINER's threads to two logical CPUs
