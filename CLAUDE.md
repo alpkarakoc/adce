@@ -367,8 +367,9 @@ looking.
 
   The rule was grepped across the whole of this document on
   `\b(always|never|every|exactly|invariably)\b`, which is the widest pattern that could
-  plausibly catch it. **66 lines matched. Zero are violations of the rule as stated.** The
-  breakdown is the finding:
+  plausibly catch it. **66 lines matched. No violation of the rule as stated was found among
+  them** — a claim narrower than the "zero violations" first written here, for the reason in
+  fault one below. The breakdown is the finding:
 
   - structural facts about the code, where the universal is a property of the source and not
     of a measurement (`aligned to exactly one ADCE_CACHELINE`, `every use routed through
@@ -380,18 +381,82 @@ looking.
   - quantities that ARE asserted, which is branch 1 working (`aged == 0`);
   - and prose about the rule itself.
 
-  One near-miss, and it is the audit earning its keep: the `harness_concurrent` entry stated
-  torn reads as "0 under strict and 1-4 under TSan" with no execution count. That is not a
-  banned universal — it is a range — but it is branch 2 with the n missing. Corrected above
-  by saying so rather than by inventing a count.
+  **The numerator's provenance, TWICE wrong, and the second correction is the instructive
+  one.** 66 replaced a prior expectation of 27. The reason first recorded — "the pattern used
+  here is wider than one keyword" — was under-explained; the reason recorded second, that 27
+  is `\bnever\b` case-sensitive, reproduces 27 exactly and is nonetheless NOT what was run.
+  The actual pipeline was the five-word-plus alternation with `-i`, a second `grep` removing
+  lines that already carry their `n`, and `head -30`. On the audited document that pipeline
+  has **56 true hits**. Thirty were displayed. Twenty-seven was reported: a miscount of a
+  truncated listing.
+
+  **Fault one: the census behind "zero violations" was partial and was read as complete.**
+  The audit saw at most 30 of 56 hits and drew a universal over the set. So the near-miss was
+  missed for TWO independent reasons, and only the first was recorded above: the pattern could
+  not reach that sentence, and the reading had already stopped before the end of what the
+  pattern did reach. Either alone is sufficient, which is why fixing the pattern would not
+  have rescued the audit. This is the same defect one entry above — a run's log read for PASS
+  or FAIL and not for its numbers, refuted by a line inside the very log that was read. A
+  partial view read as complete. What survives is narrower than what was claimed: no violation
+  was found among the lines actually examined, and the census that would license the word
+  "zero" over the document was never completed. The conclusion the entry rests on does not
+  need it — the argument against a grep gate is the ratio and the unreachable near-miss, and
+  both hold at 56 as they do at 66.
+
+  **Fault two: the provenance was DERIVED from the number rather than obtained.** `\bnever\b`
+  case-sensitive was fitted to a single figure, hit it exactly, and was wrong about the
+  mechanism — wrong about the pattern, wrong about the `-i`, wrong about the second filter,
+  and wrong that 27 was even a hit count rather than a miscounted display. Exact agreement on
+  one point carried no information, because many mechanisms pass through one point.
+
+  This is `docs/closed-loop-harness.md` §2B applied backwards. There the two candidate
+  variance recurrences were separated by a prediction that DISCRIMINATES: they differ by
+  `1/sqrt(1-alpha)` at every `g`, the measurement landed 1.6e-12 from one and 1.005e-2 from
+  the other, and the `_Static_assert` pinning `N` below 125 is pinned correctly because of it.
+  A prediction that merely agreed would have left both alive. Here the discriminating step was
+  cheaper than any measurement: **ask what command was run.** It was available for free and
+  was not taken, and a fitted model was published in its place. Prefer the observation that
+  separates candidate mechanisms over the one that confirms the mechanism you already have —
+  and when the mechanism is somebody's shell history, that observation is a question.
+
+  Two of the three figures re-derive from the document at `9b37397^` — 66 for the bare
+  five-word pattern, 27 for the fitted pattern that was never run — and the third does not,
+  which is worth stating rather than papering over. 56 is the true hit count of the pipeline
+  as its author reports it; the extra alternation term and the exclusion filter are not
+  written down precisely enough here to re-run, so 56 is testimony and 66 and 27 are
+  measurements. Recording which is which is the whole of the lesson above.
+
+  **The grep fails in BOTH directions, and the UNDER-fire is the heavier fault.** The
+  over-fire is the 66 above. The under-fire is the near-miss, and it is the audit earning its
+  keep: the `harness_concurrent` entry stated torn reads as "0 under strict and 1-4 under
+  TSan" with no execution count. That is not a banned universal — it is a range — but it is
+  branch 2 with the n missing. Corrected above by saying so rather than by inventing a count.
+
+  **That sentence contains no word in the pattern family, so no pattern in this family could
+  ever have reached it.** This is checked, not inferred: at `9b37397^` the line carrying the
+  claim (556) matched the pattern ZERO times, and the line above it (555) matched only on
+  `every`, in `aged 0 on every thread and every profile` — the `aged == 0` half, which is
+  ASSERTED and therefore a false positive. One line of false positive sitting directly on top
+  of one line of invisible true positive, in the same two-line passage. And the miss is not a
+  gap in the word list to be patched by adding words: a range with its n missing is defective
+  for what it OMITS, and no regex matches an absence.
+
+  **Over-firing is visible; under-firing reads as green.** That asymmetry is why the
+  under-fire ranks higher. 66 false positives announce themselves — the gate goes red, someone
+  reads it, and the worst case is that the check gets skipped, which is a failure everybody
+  can see. A clean run over a document that contains a real violation announces nothing, and
+  the reader draws the opposite conclusion from the one the evidence supports. This project
+  already ranks that defect class: a silently-skipping profile is worse than one that does not
+  exist. A grep gate here would be both at once — loud where it is wrong and silent where it
+  is right.
 
   **The ratio is the argument.** A grep-based gate on this rule would fire 66 times on an
   untouched document and roughly that often after any edit, with a true-positive rate of
-  zero and a near-miss rate of one. A gate that cries wolf 66 times gets skipped, and this
-  project has already ruled that a silently-skipping check is worse than one that does not
-  exist. Tightening the pattern does not rescue it: what separates a violation from a false
-  positive is whether the quantity behind the sentence is asserted anywhere, which is a fact
-  about the test suite and not about the sentence, and no regex reaches it.
+  zero and a detection rate, on the single true defect the audit found, of zero as well.
+  Tightening the pattern does not rescue it and neither does widening it: what separates a
+  violation from a false positive is whether the quantity behind the sentence is asserted
+  anywhere, which is a fact about the test suite and not about the sentence, and no regex
+  reaches it.
 
   So this stays a REVIEW RULE. **A review rule is not a control.** It is maintained by
   whoever is reading, which is exactly the property this rule was written to condemn in
