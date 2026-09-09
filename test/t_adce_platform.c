@@ -352,6 +352,7 @@ int adce_t_loop_ramp_teeth(void);
 int adce_t_loop_bucket_closed_form_report(void);
 int adce_t_loop_bucket_conservation(void);
 int adce_t_loop_bucket_identity_teeth(void);
+int adce_t_loop_bucket_clamp_regime(void);
 
 int main(void) {
     struct {
@@ -405,6 +406,7 @@ int main(void) {
         {"loop_bucket_closed_form_report", adce_t_loop_bucket_closed_form_report},
         {"loop_bucket_conservation", adce_t_loop_bucket_conservation},
         {"loop_bucket_identity_teeth", adce_t_loop_bucket_identity_teeth},
+        {"loop_bucket_clamp_regime", adce_t_loop_bucket_clamp_regime},
     };
 
     int failures = 0;
