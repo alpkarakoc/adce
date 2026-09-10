@@ -147,11 +147,31 @@ looking.
   API decision. Propose it and wait for confirmation; never fold it into a step whose
   stated scope was something else.
 - `__int128` / `unsigned __int128` is a deliberate, load-bearing compiler extension, not
-  an oversight. `adce_q16_mul`, `adce_q16_div`, and the token bucket all need a width
-  above 64 bits, and `ADCE_Q16_MAX` is `INT64_MAX`, so a 16-bit left shift of a full-range
-  numerator does not fit in `int64_t`. The dependency is made explicit by the `#error`
-  guard at the top of the header. Do not "clean it up" — it cannot be removed without
-  narrowing the Q16 lane, which is a separate design decision.
+  an oversight. **Its scope is narrower than this entry recorded for most of the project's
+  life, and the correction is below rather than folded in silently.** Nothing is removed;
+  what changes is how many legs the justification actually stands on.
+
+  Three sites use the width, and they are NOT three independent shipping justifications:
+
+  | site | reaches 128-bit | shipping call sites |
+  |---|---|---|
+  | `adce_q16_mul` | own body | **0** |
+  | `adce_q16_div` | own body | **0** |
+  | `adce_token_refill` | **own body, directly** | 1 (`adce_enf_decide`) |
+
+  **The token bucket does not reach the width through the Q16 helpers.**
+  `adce_token_refill` casts to `adce_u128_t` itself — `(adce_u128_t)rate * (adce_u128_t)
+  elapsed`, then the sum, then the clamp — and calls neither `adce_q16_mul` nor
+  `adce_q16_div`. So the one executed leg is independent of the two that are not executed,
+  and removing either Q16 helper would not touch it.
+
+  `ADCE_Q16_MAX` is `INT64_MAX`, so a 16-bit left shift of a full-range numerator does not
+  fit in `int64_t` — that argument is about `adce_q16_div` specifically, which is the leg
+  with no shipping caller. The dependency is made explicit by the `#error` guard at the top
+  of the header. Do not "clean it up" — it cannot be removed without narrowing the Q16 lane,
+  which is a separate design decision. **That conclusion survives, but on the PUBLISHED LANE
+  rather than on three shipping paths**, and the difference matters when someone next weighs
+  the extension against portability.
 - The shipping target builds and its tests pass under GCC 14 on linux/arm64 and
   linux/amd64 (`scripts/verify-linux-gcc.sh`). GCC's `__int128` pedwarn under `-pedantic`
   is resolved by `__extension__` on the two typedefs, with every use routed through them:
@@ -1198,6 +1218,55 @@ looking.
   method that re-derives it, beside the thing it describes, so the next reader can run it
   rather than trust it. The corrected figures are now written next to the patterns that
   produce them, which is branch 2 of that rule and not branch 1. **Nothing gates them.**
+
+- **The `__int128` re-derivation, measured. At the SHIPPED tuning no execution path can
+  reach a 64-bit overflow at all.** The evidence behind the re-scoped locked decision above,
+  taken by running each site against a 64-bit formulation of itself rather than by reasoning
+  about widths.
+
+  | site | first divergence from a 64-bit formulation | 64-bit result | shipping callers |
+  |---|---|---|---|
+  | `adce_q16_mul` | operands of `65536.0` (raw `2^32`) | `0.0` where the true product is `2^32.0` | 0 |
+  | `adce_q16_div` | numerator `2147483648.0` (raw `2^47`), divisor `3.0` | **sign inverted**: `-715827882.67` for `+715827882.67` | 0 |
+  | `adce_token_refill` | `elapsed_ns = 2,635,249,153,387,078,803` at `R = 7` | `5` raw where the true value is the full capacity | 1 |
+
+  **The token bucket's threshold is 83.51 years of idle time**, and that is `floor(2^64 / R)`
+  at the shipped `ADCE_ENF_RATE_Q16_PER_NS` of 7. `elapsed_ns` is time since that thread's
+  last stage-two arrival, so reaching it means one ingress thread taking no admitted traffic
+  for eight decades. It is not reachable by any deployment of this code.
+
+  **And the clamp masks even that, almost entirely.** A wrapped product still exceeding
+  capacity clamps to capacity either way, so the 64-bit and 128-bit forms agree unless the
+  wrap lands BELOW `C`. That window is `C / R` wide — **38,347,923 ns, about 38.3 ms, out of
+  every 2.64e18 ns, or 1.46e-9 % of the range.** `C / R` is the same 38.3 ms this codebase
+  already knows as the gap that refills a starved bucket to capacity, quoted in
+  `loop_bucket_check_identity`; the two are the same quantity arrived at from opposite ends.
+
+  So the width at that site is **defensive against retuning and against consumer-supplied
+  rates, not against the shipped configuration.** The rate at which it starts to matter is
+  `2^64 / T` for an idle window `T`: about 586 for a year, 213,504 for a day, 5.12e6 for an
+  hour. The deployment tuning block invites exactly this retuning, which is why the width
+  stays.
+
+  **What this does and does not overturn.** It does NOT overturn the decision: the lane is
+  published, `adce_q16_div` is callable by consumers at full range, and at full range the
+  64-bit form inverts the sign — stated as a fact rather than as a safety property, though it
+  is worth knowing that a negative Q16 reads as MAXIMAL by the clamp rule, so the failure
+  would be wrong rather than open. It DOES overturn the entry's weight. "All three need a
+  width above 64 bits" is true of the three FUNCTIONS and false as a count of shipping
+  justifications, and a justification standing on one of three named legs is weaker than the
+  old wording read.
+
+  **This is the third instance of one class in as many tasks**, and the class is now worth
+  naming as a habit rather than as an incident: `adce_epoch_is_stale`, the `__int128` legs,
+  and `adce_rng_next_unit` are all prose that names a real function, describes its behaviour
+  correctly, and is wrong about the system because the code takes a different path. The
+  common cause is that **a justification is written once, at the moment it is true, and is
+  never re-evaluated against the call graph afterwards.** `scripts/check-internal-use.sh`
+  catches the zero-caller end of it. It does not catch this one, and nothing does: a leg with
+  ONE shipping caller is invisible to a zero-caller check, and two of the three functions the
+  Q16 lane annotation names are exactly there. Read every named justification in this
+  document as dated.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
