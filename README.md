@@ -275,15 +275,23 @@ case that compiles but is never wired into the runner table turns the gate red.
 | `DC` and `R` cannot separate a limit cycle from dither | `loop_settle_metrics_teeth`: `dither.dc == sq.dc`, `dither.r_q16 == sq.r_q16` |
 | `N < 125` | `_Static_assert` in `include/adce_observe.h`, compile time |
 
-Two fail-closed contracts, both asserted in `enf_stale_route_classify`. A torn
-`adce_epoch_read` counts as stale, because no snapshot means no advice, and torn dominates
-every timestamp including ones that would otherwise read fresh. A *future* `observed_at_ns` is
-stale too: a reader that cannot order the publication it read against the clock it read has no
-coherent view of time. `adce_epoch_is_stale` produces that through an unsigned wrap, and
-`adce_enf_classify_stale` decides the route *before* the subtraction, which is why the case
-asserts `UINT64_MAX` classifies as future rather than aged. Replacing the wrap with a signed
-difference, a saturating guard, or an `observed_at_ns > now_ns` branch returning 0 turns the
-case fail-**open**.
+Two fail-closed contracts, both asserted in `enf_stale_route_classify`, and both carried by
+`adce_enf_classify_stale` — which is the only staleness code the gate runs.
+
+A torn `adce_epoch_read` counts as stale, because no snapshot means no advice, and torn
+dominates every timestamp including ones that would otherwise read fresh. A *future*
+`observed_at_ns` is stale too: a reader that cannot order the publication it read against the
+clock it read has no coherent view of time. `adce_enf_classify_stale` decides that with an
+explicit `observed_at_ns > now_ns` branch, taken **before** the subtraction, which is why the
+case asserts that `UINT64_MAX` classifies as future rather than aged. **Delete that branch and
+the case fails**, which is how this sentence is known to be a claim rather than a description.
+
+An earlier version of this paragraph credited the unsigned wrap in `adce_epoch_is_stale`
+instead, and warned that replacing the wrap would turn the case fail-open. That was false. The
+gate does not call `adce_epoch_is_stale` — it has zero call sites outside the test suite — so
+replacing its wrap changes nothing the gate does, and `enf_stale_route_classify` stays green
+when you do. The sentence named a real function that behaves exactly as described and was
+still wrong about the system. See the entry on that in `CLAUDE.md`.
 
 ## What is measured and deliberately not asserted
 
