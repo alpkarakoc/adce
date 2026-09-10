@@ -83,7 +83,10 @@ looking.
 - `_Alignas` is applied to the first member, never to the typedef (C11 §6.7.5p2).
   This broke the first build; keep it that way.
 - `adce_epoch_publish` / `adce_epoch_read` / `adce_epoch_is_stale` implement the
-  publish/consume + fail-closed watchdog pattern.
+  publish/consume + fail-closed watchdog pattern. Two of the three are still wired into it:
+  `adce_epoch_publish` has one shipping call site and `adce_epoch_read` has one.
+  `adce_epoch_is_stale` has ZERO and is reached only from tests — see the entry on that, and
+  the open API question it carries.
 - Time source is `CLOCK_MONOTONIC_RAW` only.
 - Platform-specific primitives (CPU pause, entropy) live behind `ADCE_*` macros in one
   block at the top of the header. Nothing else in the codebase is arch-conditional.
@@ -895,17 +898,108 @@ looking.
   divisor therefore reads as maximal pressure downstream, never as zero. `0 / 0` is
   `ADCE_Q16_MAX` by this rule. This is a fail-closed contract; changing it is an API
   decision.
-- A FUTURE `observed_at_ns` reads as maximally stale, and the unsigned wrap in
-  `adce_epoch_is_stale` is what produces it. A reader that cannot order the publication it
-  read against the clock it read has no coherent view of time and must not act on that
-  publication, so the wrap is load-bearing rather than an oversight: replacing it with a
-  signed difference, a saturating guard, or an `observed_at_ns > now_ns` branch returning 0
-  turns the case fail-OPEN. A torn `adce_epoch_read` counts as stale for the same reason —
-  no snapshot means no advice. Both are reachable without any fault and both require a
-  concurrent publication, so nonzero `stale_reads` on a healthy system is expected. Full
-  statement in `adce_platform.h` above `adce_epoch_is_stale` and in
-  `docs/enforcement-plane.md` §4.1, with the measurements. This is a fail-closed contract;
-  changing it is an API decision.
+- A FUTURE `observed_at_ns` reads as maximally stale, and **the explicit
+  `observed_at_ns > now_ns` branch in `adce_enf_classify_stale` is what produces it** on
+  every path the gate takes. A reader that cannot order the publication it read against the
+  clock it read has no coherent view of time and must not act on that publication, so that
+  branch is load-bearing rather than an oversight: DELETE IT and `enf_stale_route_classify`
+  and `enf_stale_route_identity` both fail. That is not an argument, it was run — mutation
+  M05b of the README campaign. A torn `adce_epoch_read` counts as stale for the same reason —
+  no snapshot means no advice — and deleting the `have_snapshot` branch fails the same case.
+  Both are reachable without any fault and both require a concurrent publication, so nonzero
+  `stale_reads` on a healthy system is expected. Measurements in
+  `docs/enforcement-plane.md` §4.1. This is a fail-closed contract; changing it is an API
+  decision.
+
+  **This entry used to credit the unsigned wrap in `adce_epoch_is_stale`, and that was
+  false.** Replacing the wrap with a branch returning 0 — the exact mutation the old text
+  warned about — leaves `enf_stale_route_classify` GREEN, because the gate does not call that
+  function. The wrap was load-bearing until `adce_enf_classify_stale` landed and took over the
+  ordering decision; the entry was never updated. The class of error is recorded below.
+- **A SENTENCE CAN NAME A REAL FUNCTION, DESCRIBE ITS BEHAVIOUR EXACTLY, AND STILL BE FALSE
+  ABOUT THE SYSTEM.** The class behind the `adce_epoch_is_stale` correction above, and the
+  reason it is recorded as a class rather than as one fixed paragraph.
+
+  **The measurement first.** Counted with comments stripped, so a mention and a call are not
+  confused:
+
+  | | shipping (`include/` + `src/`) | tests |
+  |---|---|---|
+  | `adce_epoch_publish` | 1 call | 19 calls |
+  | `adce_epoch_read` | 1 call | 17 calls |
+  | **`adce_epoch_is_stale`** | **0 calls** | **14 calls** |
+
+  In shipping code the name appears six times: the definition in `adce_platform.h`, and five
+  MENTIONS, every one of them inside a comment — two in `adce_enforce.h`, one in
+  `adce_observe.h`, one in `src/adce_observe.c`, one in `src/adce_obs_thread.c`. `src/` calls
+  it zero times. Every one of its fourteen call sites is in `test/`. The locked decision above
+  names three functions as implementing one pattern; two of them still do.
+
+  **What makes this a distinct failure and not an ordinary stale comment.** Every word of the
+  old sentence about `adce_epoch_is_stale` was true OF THAT FUNCTION. It does compute an
+  unsigned difference; the difference does wrap on a future timestamp; the wrap does make it
+  return "stale". Nothing about the function changed, nothing about it was misdescribed, and a
+  reader checking the sentence against the function would confirm it line by line and come
+  away satisfied. **What changed is which path the code takes.** `adce_enf_classify_stale`
+  landed and made the ordering decision itself, with an explicit branch, and from that moment
+  the gate stopped going through the function the prose was pointing at. The sentence
+  survived because it was never about the wrong function — it was about the wrong ROUTE.
+
+  **Neither a reader nor a grep can reach this.** A reader has the sentence and the function,
+  and the two agree. A grep has the name, and the name is present in shipping code — six
+  times — so no pattern over the text distinguishes a live mechanism from a commented-out
+  memorial to one. This is the same wall the printed-universal audit hit and for the same
+  reason: what separates a true sentence from a false one here is a fact about which code
+  executes, and no property of the text encodes it. Call-graph tooling would find the zero
+  call sites but not that a paragraph depends on them.
+
+  **It was reachable by exactly one method: breaking the thing the sentence claims is
+  enforced.** Mutation M05a of the README campaign replaced the wrap with the very branch the
+  old text warned would fail open — `if (observed_at_ns > now_ns) return 0;` — and
+  `enf_stale_route_classify`, the case the paragraph named, stayed GREEN. One case fired,
+  `enf_stale_route_equivalence`, and it was not the one cited. Fourteen other mutations in the
+  same campaign fired the case the page named; this one did not, which is what isolated it.
+
+  **That is what the README's binding rule bought, and it is the reason to keep paying for
+  it.** The rule — every load-bearing claim names the assertion that enforces it or is marked
+  unenforced — looked like a documentation convention. It is not. Naming an assertion makes a
+  prose claim EXECUTABLE: the sentence acquires a falsifier, and the falsifier can be run.
+  Without the name there is nothing to break and the error is undetectable by any means short
+  of reading the whole call graph and the whole page together. This is branch 3 of the
+  printed-universal rule applied to prose rather than to numbers: remove the ambiguity so the
+  claim becomes checkable.
+
+  Standing consequence: **a prose claim that names a mechanism should name the assertion that
+  fails when the mechanism is removed, not the function whose behaviour it describes.** Those
+  are different things, and this entry exists because they were confused once.
+
+- **OPEN API QUESTION, proposed and NOT decided: what is `adce_epoch_is_stale` for?**
+  Recorded here rather than acted on, because it is `static inline` in a public header and
+  removing or changing it is an API decision, which the working agreement requires to be
+  proposed and waited on. Nothing about it is changed in the commit that adds this entry.
+
+  The question is exactly two-sided and the evidence does not settle it:
+
+  1. **It is public API with no internal user** — a predicate offered to consumers who read
+     the epoch themselves rather than through `adce_enf_decide`, in which case zero internal
+     call sites is the design working and the fourteen test call sites are its coverage. If
+     so, it needs a comment saying so, because nothing currently distinguishes this case from
+     the other one.
+  2. **It is dead code with a test suite attached** — superseded by `adce_enf_classify_stale`,
+     which computes strictly more (three routes rather than one bit) and is what the gate
+     runs. If so, the fourteen tests are testing something no shipping path executes, and
+     `enf_stale_route_equivalence` is pinning the gate to a predicate the gate abandoned.
+
+  What tips it slightly toward (1): `docs/enforcement-plane.md` §4.1 and
+  `docs/observation-plane.md` both describe consumer-side staleness checking, and a
+  header-only library that publishes an epoch state should plausibly publish the predicate for
+  reading it. What tips it toward (2): `adce_enf_classify_stale` returns `ADCE_ENF_FRESH` for
+  exactly the cases `adce_epoch_is_stale` returns 0, so any consumer wanting the bit can take
+  it from the classifier and get the route for free.
+
+  **Do not resolve this by deleting the function while tidying something else.** If it is
+  removed, `enf_stale_route_equivalence` loses its reference predicate and the equivalence
+  argument that justified the classifier's landing has to be restated against something else.
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.
