@@ -208,12 +208,21 @@ jobs:
   #
   # THE UNMEASURED RISK, stated rather than buried. Its false-positive rate is
   # UNKNOWN. What is known is the frequency, measured retrospectively over this
-  # repository's whole history: of 24 merges to main that touched src/*.c or
-  # test/*.c, **17 would have fired**. Of those 17, the number that had a
-  # boundary worth recording is not determinable mechanically -- it is a
-  # judgement about each change -- and the three confirmed stale-list instances
-  # are the only true positives this project can point to. So the firing rate is
-  # 71% against a demonstrated true-positive count of 3.
+  # repository's whole history and RE-DERIVED when the pattern widened:
+  #
+  #   pattern                            merges touched   would fire
+  #   ^(src|test)/.*\.c$  (original)          24              16   67%
+  #   ^(src|include|test)/.*\.(c|h)$          28              19   68%
+  #
+  # The original figure was first recorded as "17 of 24, 71%" and that was a
+  # MISCOUNT -- see the entry in CLAUDE.md. 16 and 19 are enumerated commit by
+  # commit, not eyeballed off a list.
+  #
+  # Of the 19, the number with a boundary worth recording is not determinable
+  # mechanically -- it is a judgement about each change -- and the three
+  # confirmed stale-list instances are the only true positives this project can
+  # point to. So the firing rate is 68% against a demonstrated true-positive
+  # count of 3.
   #
   # That ratio is NOT a false-positive rate, and reading it as one would
   # overstate the case against this check. The cost of a firing is not a red
@@ -265,9 +274,15 @@ jobs:
 
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
 
-          code="$(printf '%s\n' "$changed" | grep -E '^(src|test)/.*\.c$' || true)"
+          # include/ is IN SCOPE and its absence was a hole. The entire
+          # Enforcement Plane lives in include/adce_enforce.h with no .c file at
+          # all -- a locked decision -- so the original ^(src|test)/.*\.c$ let a
+          # change to the whole plane through without asking. Demonstrated on
+          # PR #26, which changed four headers and got "Nothing to ask about".
+          code="$(printf '%s\n' "$changed" \
+                  | grep -E '^(src|include|test)/.*\.(c|h)$' || true)"
           if [ -z "$code" ]; then
-              echo "No src/*.c or test/*.c changed. Nothing to ask about."
+              echo "No shipping or test source changed. Nothing to ask about."
               exit 0
           fi
 
@@ -292,8 +307,8 @@ jobs:
           fi
 
           echo
-          echo "FAIL: this pull request changes src/*.c or test/*.c and leaves"
-          echo "      CLAUDE.md untouched."
+          echo "FAIL: this pull request changes shipping or test source and"
+          echo "      leaves CLAUDE.md untouched."
           echo
           echo "The unverified list has gone stale in the under-claiming direction"
           echo "three times, and both #16 and #20 had exactly this shape: test files"
@@ -331,8 +346,9 @@ jobs:
   # sentence is worded. Different predicate, different verdict.
   #
   # ITS COST PROFILE IS THE OPPOSITE OF THE BOUNDARY NOTE'S. The boundary note
-  # fires on 71% of pull requests forever, which is why its evaluation counts
-  # escape uses. This one fires once per function, ever: wire it up, delete it,
+  # fires on about two thirds of pull requests forever, which is why its
+  # evaluation counts escape uses. This one fires once per function, ever: wire
+  # it up, delete it,
   # or annotate it, and it is quiet until the answer changes. A one-time burst is
   # not the failure this project condemns; a recurring prompt answered by reflex
   # is. No ten-PR evaluation is scheduled for this check because there is nothing

@@ -38,8 +38,8 @@
 #
 # STEADY-STATE COST, which is the number that matters. It fires once per
 # function, ever: annotate it or wire it up, and it is quiet until the answer
-# changes. Contrast the boundary note, which fires on 71% of pull requests
-# forever. A one-time burst is not the failure mode this project condemns; a
+# changes. Contrast the boundary note, which fires on about two thirds of pull
+# requests forever (19 of 28, enumerated). A one-time burst is not the failure mode this project condemns; a
 # recurring prompt answered by reflex is.
 set -euo pipefail
 
