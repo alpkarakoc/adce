@@ -181,3 +181,132 @@ jobs:
 
       - name: verify-linux-gcc.sh (linux/arm64 + linux/amd64)
         run: ./scripts/verify-linux-gcc.sh
+
+  # ===========================================================================
+  # THE BOUNDARY NOTE. Proposed, not proven -- read the risk paragraph below
+  # before trusting it.
+  #
+  # WHAT IT CHECKS. A pull request that changes any src/*.c or test/*.c must
+  # either change CLAUDE.md too, or say in a commit message that it did not move
+  # a boundary.
+  #
+  # WHY IT EXISTS. The unverified list in CLAUDE.md has gone stale in the
+  # UNDER-claiming direction three times: entry (1) across #10-#13, entry (2)
+  # after #16, and the loop case table after #20. The cause is mechanical rather
+  # than inattentive. #16 and #20 each touched test files ONLY, with CLAUDE.md
+  # untouched in both, so the commit that moved the boundary and the commit that
+  # recorded the move landed in different pull requests and the list was wrong
+  # for the whole window between them -- days, not minutes. Care cannot close
+  # that window: whoever moved the boundary has already merged and gone.
+  #
+  # WHY A COMMIT MESSAGE AND NOT THE PR BODY. The escape has to be countable
+  # later, and countable from the repository alone. Merged commit messages are
+  # greppable with `git log --grep` and, since the ruleset forbids
+  # non_fast_forward, cannot be rewritten afterwards. A pull request body is
+  # editable after merge and reachable only through the API. The evaluation
+  # below depends on counting escapes, so the escape lives where counting works.
+  #
+  # THE UNMEASURED RISK, stated rather than buried. Its false-positive rate is
+  # UNKNOWN. What is known is the frequency, measured retrospectively over this
+  # repository's whole history: of 24 merges to main that touched src/*.c or
+  # test/*.c, **17 would have fired**. Of those 17, the number that had a
+  # boundary worth recording is not determinable mechanically -- it is a
+  # judgement about each change -- and the three confirmed stale-list instances
+  # are the only true positives this project can point to. So the firing rate is
+  # 71% against a demonstrated true-positive count of 3.
+  #
+  # That ratio is NOT a false-positive rate, and reading it as one would
+  # overstate the case against this check. The cost of a firing is not a red
+  # build; it is a forced decision, and one of the two answers is a single line
+  # of text. But the ratio is exactly the shape this project has already ruled
+  # dangerous: a check that fires on most changes gets answered by reflex, the
+  # escape line becomes a paste, and a gate answered by reflex is a ritual. This
+  # project records that a silently-skipping profile is worse than one that does
+  # not exist; a gate escaped by habit is the same defect wearing a green tick.
+  #
+  # THE EVALUATION, fixed in advance so the result cannot be chosen afterwards.
+  # After TEN pull requests subject to this check, count the escape uses:
+  #
+  #     git log --grep='no boundary change' --oneline main
+  #
+  # If that count is high -- most of the ten -- the check is a ritual and must be
+  # REMOVED, with the removal recorded as a negative result in CLAUDE.md the way
+  # the printed-universal grep audit was. It is not to be kept because removing
+  # it would look like retreat. If the count is low and the list stayed current,
+  # it earned its place and the ruleset should be updated to require it.
+  #
+  # NOT REQUIRED BY THE RULESET, and this is a real gap rather than an oversight.
+  # The ruleset on main requires exactly three contexts -- sanitizers
+  # (ubuntu-24.04), sanitizers (ubuntu-24.04-arm), shipping-target -- so this job
+  # shows red without blocking a merge. An advisory red is the mirror image of
+  # the CodeRabbit tick this project already documents: that one passes green
+  # having reviewed nothing, this one fails red having stopped nothing. Adding it
+  # to the ruleset is a separate, deliberate act and is NOT done here, because a
+  # check whose false-positive rate is unmeasured should not be able to block a
+  # merge on its first day.
+  # ===========================================================================
+  boundary-note:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Both endpoints of the range must be present, so no shallow clone.
+          fetch-depth: 0
+
+      - name: Boundary note
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+
+          code="$(printf '%s\n' "$changed" | grep -E '^(src|test)/.*\.c$' || true)"
+          if [ -z "$code" ]; then
+              echo "No src/*.c or test/*.c changed. Nothing to ask about."
+              exit 0
+          fi
+
+          echo "Code files changed in this pull request:"
+          printf '  %s\n' $code
+
+          if printf '%s\n' "$changed" | grep -qx 'CLAUDE.md'; then
+              echo
+              echo "CLAUDE.md changed too. The record moved with the code."
+              exit 0
+          fi
+
+          # The escape. Searched across every commit message in the range,
+          # -i because the phrase is a sentence and not a token.
+          if git log --format='%B' "$BASE_SHA".."$HEAD_SHA" \
+                 | grep -qi 'no boundary change'; then
+              echo
+              echo "ESCAPE USED: a commit in this range says 'no boundary change'."
+              echo "This is one tally mark against the check. See the evaluation"
+              echo "criterion in .github/workflows/verify.yml."
+              exit 0
+          fi
+
+          echo
+          echo "FAIL: this pull request changes src/*.c or test/*.c and leaves"
+          echo "      CLAUDE.md untouched."
+          echo
+          echo "The unverified list has gone stale in the under-claiming direction"
+          echo "three times, and both #16 and #20 had exactly this shape: test files"
+          echo "only, CLAUDE.md untouched, the record catching up in a later PR."
+          echo
+          echo "Two ways past this, and both are correct answers:"
+          echo
+          echo "  1. Update CLAUDE.md in its OWN COMMIT inside this pull request."
+          echo "     CLAUDE.md is not a gate -- it checks nothing and blocks"
+          echo "     nothing -- so the own-commit rule is satisfied by a separate"
+          echo "     commit in the same PR, and that is what closes the window."
+          echo
+          echo "  2. If nothing this PR does moves a boundary the list describes,"
+          echo "     say so in a commit message: 'no boundary change: <reason>'."
+          echo "     Each use is counted against this check when it is evaluated."
+          exit 1
