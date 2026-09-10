@@ -1062,6 +1062,100 @@ looking.
   **Do not resolve this by deleting the function while tidying something else.** If it is
   removed, `enf_stale_route_equivalence` loses its reference predicate and the equivalence
   argument that justified the classifier's landing has to be restated against something else.
+- **The internal-use check, and the measurement taken BEFORE it was asserted.**
+  `scripts/check-internal-use.sh`: every function in `include/` must have a call site in
+  `include/` or `src/`, comments and string literals stripped and the definition excluded,
+  or carry `ADCE_PUBLIC_NO_INTERNAL_USER: <reason>` above its declaration.
+
+  **THE MECHANISM IT CLOSES IS THE TEST SUITE, and that is broader than the
+  `adce_epoch_is_stale` instance.** A dead function with a test suite attached reads as
+  maximally live from every angle except the one that matters. `adce_epoch_is_stale` had
+  fourteen test call sites and zero shipping ones: it compiled, it was covered, its tests
+  were green, and two documentation paragraphs pointed at it as a live mechanism. Coverage
+  is what kept it warm. **The check therefore counts test calls at ZERO weight, on purpose.**
+
+  This is not one function's problem. Measured on the same tree:
+
+  | | shipping call sites | test call sites |
+  |---|---|---|
+  | `adce_epoch_publish` | **1** | 19 |
+  | `adce_epoch_read` | **1** | 17 |
+  | `adce_epoch_is_stale` | 0 | 14 |
+
+  Two of the three are **one refactor from the third**, with nothing in the gate that would
+  turn red on the way. That is the standing exposure, not a hypothetical.
+
+  **THE MEASUREMENT, and it is not the hoped-for result.** The predicate as first specified
+  — call sites in `src/` only — fires on **27 of 37** functions. That is unusable, and worse
+  than the printed-universal grep's 66. The cause is that this is a header-only library: the
+  Enforcement Plane has NO `.c` file by locked decision, so every `adce_enf_*` function is at
+  zero by design, and the platform layer's internal callers are other headers rather than
+  `src/`. Counting `src/` alone measures the wrong graph.
+
+  Corrected to count `include/` **and** `src/`, it fires on **14 of 37**, which sort into
+  three groups:
+
+  | group | n | verdict |
+  |---|---|---|
+  | consumer entry points (`adce_obs_tap`, `adce_enf_admit`, `adce_enf_thread_init`, `adce_obs_thread_start`) | 4 | correct; zero internal callers IS what an entry point is |
+  | the published Q16 lane (`adce_q16_*`) | 8 | correct; consumers receive `pressure` in Q16 and the library converts with a private cast |
+  | genuinely open (`adce_epoch_is_stale`, `adce_rng_next_unit`) | 2 | the finding |
+
+  Twelve are annotated. **Two are left red deliberately**, because annotating them would
+  answer an API question the working agreement requires to be proposed and waited on. The red
+  IS the open question, held visible until it is answered.
+
+  So: it does NOT fire on `adce_epoch_is_stale` alone. It fires on fourteen, thirteen of
+  which are explained on their first encounter and stay quiet afterwards. Recorded this way
+  round because measuring after asserting is how a number gets fitted to a conclusion, which
+  this document already has three entries about.
+
+- **WHY THIS PREDICATE IS MECHANISABLE WHERE THE PRINTED-UNIVERSAL ONE WAS NOT. Do not read
+  that negative result as "gates do not work here."** The two differ in kind, not in degree,
+  and the difference is where the predicate lives.
+
+  | | printed-universal rule | internal-use check |
+  |---|---|---|
+  | the question | is the quantity behind this sentence asserted anywhere? | does a call edge exist from shipping code to this function? |
+  | evaluated over | English prose | the code |
+  | the answer lives in | the TEST SUITE — a different artefact from the one being judged | the same artefact being judged |
+  | decidable from the input? | **no** — no property of a sentence determines it | **yes** — exactly, by parsing |
+  | phrasing-dependent | yes | no |
+  | firing profile | 66 per document, forever, true-positive rate zero | once per function, ever |
+
+  The printed-universal predicate failed because it had to cross from text to test suite and
+  nothing in the text encoded the crossing. That is a statement about THAT predicate. This one
+  never leaves the code: a call edge is a syntactic fact with an exact answer, and no wording
+  anywhere can change it.
+
+  **The cost profiles differ in the same direction and this is what makes it landable.** The
+  boundary note fires on 71% of pull requests forever, which is why its evaluation counts
+  escape uses after ten pull requests. This check fires once per function and is then quiet
+  until the answer changes — a one-time burst of thirteen, not a recurring prompt. A
+  recurring prompt gets answered by reflex, which is the failure this project condemns; a
+  one-time burst does not. **No ten-PR evaluation is scheduled for this check**, deliberately,
+  because there is nothing recurring to measure. If it does decay it will show as annotations
+  accumulating with empty reasons, which is what requiring the reason after the marker is for.
+
+  Neither check is in the ruleset's required contexts, so both show red without blocking.
+
+- **SECOND OPEN API QUESTION, found by the check on its first run: what is
+  `adce_rng_next_unit` for?** Proposed and NOT decided; nothing about it is changed.
+
+  It has zero shipping call sites and one test call site. Its own comment in
+  `adce_platform.h` says it is "confined to the Observation Plane by convention", and
+  `src/adce_observe.c` does not call it — the same shape as `adce_epoch_is_stale`, where prose
+  names a real function that behaves exactly as described and the code takes another route.
+  Either it is public API for consumers doing their own floating-point work in the
+  Observation Plane, in which case the convention comment should say that instead of
+  describing an internal home it does not have; or it is dead, in which case the lane
+  convention it anchors — `adce_enforce.h` and this document both cite it by name as the thing
+  the Enforcement Plane must not use — is anchored to nothing.
+
+  Note the asymmetry before deciding: the convention it names is still doing work even if the
+  function is not. "No `double` and no `adce_rng_next_unit`" is a live rule about the
+  Enforcement Plane whether or not anything calls the function.
+
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.

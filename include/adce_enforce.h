@@ -285,6 +285,11 @@ static inline adce_enf_outcome_t adce_enf_decide(adce_enf_ctx_t *ctx,
 /* The call an ingress site makes. Supplies the draw from the CALLING
  * translation unit's stream, which is the stream adce_enf_thread_init below
  * warms. */
+/* ADCE_PUBLIC_NO_INTERNAL_USER: step 2 of the ingress recipe, and it CANNOT have
+ * an internal caller by construction. It draws from the calling translation
+ * unit's adce_rng_tls, which is why the Enforcement Plane has no .c file at all.
+ * A shipping call site here would be the exact defect docs/enforcement-plane.md
+ * section 6 exists to prevent. */
 static inline adce_enf_outcome_t adce_enf_admit(adce_enf_ctx_t *ctx,
                                                 uint64_t now_ns) {
     return adce_enf_decide(ctx, now_ns, adce_rng_next());
@@ -311,6 +316,9 @@ static inline adce_enf_outcome_t adce_enf_admit(adce_enf_ctx_t *ctx,
  * while the inline adce_enf_admit above draws from the caller's, leaving the
  * abort exactly where this call was meant to move it from -- and doing so
  * silently, since both functions would still appear to work. */
+/* ADCE_PUBLIC_NO_INTERNAL_USER: called once per ingress thread at thread start,
+ * from the consumer's translation unit for the same reason as adce_enf_admit --
+ * it must warm the stream the gate later draws from. */
 static inline void adce_enf_thread_init(adce_enf_ctx_t *ctx,
                                         const adce_epoch_state_t *epoch,
                                         uint64_t now_ns) {

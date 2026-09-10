@@ -162,6 +162,9 @@ _Static_assert(_Alignof(adce_obs_counter_t) == ADCE_CACHELINE,
  * after the gate would close a feedback loop in which the detector measures
  * its own output. Relaxed because the count carries no ordering: it is a
  * statistic, read once per epoch by the observer thread. */
+/* ADCE_PUBLIC_NO_INTERNAL_USER: step 1 of the ingress recipe. Called by the
+ * consumer's arrival path and by nothing inside the library -- the library is
+ * the reader of this counter, never its writer. See README.md. */
 static inline void adce_obs_tap(adce_obs_counter_t *counter) {
     atomic_fetch_add_explicit(&counter->arrivals, (uint64_t)1,
                               memory_order_relaxed);

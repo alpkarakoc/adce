@@ -310,3 +310,50 @@ jobs:
           echo "     say so in a commit message: 'no boundary change: <reason>'."
           echo "     Each use is counted against this check when it is evaluated."
           exit 1
+
+  # ===========================================================================
+  # THE INTERNAL-USE CHECK. Proposed alongside the boundary note and evaluated
+  # separately -- the two have opposite cost profiles and must not be judged
+  # together.
+  #
+  # See scripts/check-internal-use.sh for what it checks and why. The three
+  # things worth having in the workflow itself:
+  #
+  # WHY IT IS MECHANISABLE WHERE THE PRINTED-UNIVERSAL GREP WAS NOT, because
+  # this project's own record contains a negative result about gating a
+  # documentation rule and that result must not be generalised into "gates do
+  # not work here". The printed-universal predicate was: is the quantity behind
+  # this sentence asserted anywhere. That is a fact about the TEST SUITE reached
+  # from a fact about ENGLISH, so the predicate lived outside the text it had to
+  # judge and no regex could cross the gap. This predicate is: does a call edge
+  # exist from shipping code to this function. That is a fact about the code,
+  # evaluated against the code. Decidable, exact, and independent of how any
+  # sentence is worded. Different predicate, different verdict.
+  #
+  # ITS COST PROFILE IS THE OPPOSITE OF THE BOUNDARY NOTE'S. The boundary note
+  # fires on 71% of pull requests forever, which is why its evaluation counts
+  # escape uses. This one fires once per function, ever: wire it up, delete it,
+  # or annotate it, and it is quiet until the answer changes. A one-time burst is
+  # not the failure this project condemns; a recurring prompt answered by reflex
+  # is. No ten-PR evaluation is scheduled for this check because there is nothing
+  # recurring to measure -- if it becomes noisy that will be visible as
+  # annotations accumulating without reasons, which is what requiring a reason
+  # after the marker is for.
+  #
+  # NOT REQUIRED BY THE RULESET, same as the boundary note, and here that is
+  # load-bearing rather than caution: this check lands RED on two functions
+  # whose API question is genuinely open and has been proposed rather than
+  # decided. The red IS the open question, held visible until it is answered.
+  # ===========================================================================
+  internal-use:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Toolchain
+        run: python3 --version
+
+      - name: check-internal-use.sh
+        run: ./scripts/check-internal-use.sh
