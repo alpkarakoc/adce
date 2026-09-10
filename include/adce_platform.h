@@ -232,7 +232,12 @@ _Static_assert(32 + ADCE_Q16_FRAC_BITS < 64,
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_from_int(int32_t v) {
     /* Shift through unsigned width. Left-shifting a negative signed value is
      * undefined (C11 6.5.7p4) regardless of what the target emits; the
@@ -251,7 +256,12 @@ static inline adce_q16_t adce_q16_from_int(int32_t v) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline int32_t adce_q16_to_int(adce_q16_t v) {
     return (int32_t)(v >> ADCE_Q16_FRAC_BITS);
 }
@@ -263,7 +273,12 @@ static inline int32_t adce_q16_to_int(adce_q16_t v) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_add(adce_q16_t a, adce_q16_t b) {
     return a + b;
 }
@@ -275,7 +290,12 @@ static inline adce_q16_t adce_q16_add(adce_q16_t a, adce_q16_t b) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_sub(adce_q16_t a, adce_q16_t b) {
     return a - b;
 }
@@ -287,7 +307,12 @@ static inline adce_q16_t adce_q16_sub(adce_q16_t a, adce_q16_t b) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_mul(adce_q16_t a, adce_q16_t b) {
     adce_i128_t wide = (adce_i128_t)a * (adce_i128_t)b;
     return (adce_q16_t)(wide >> ADCE_Q16_FRAC_BITS);
@@ -300,7 +325,12 @@ static inline adce_q16_t adce_q16_mul(adce_q16_t a, adce_q16_t b) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
     /* A zero divisor has no representable quotient. Saturate toward the
      * numerator's sign -- the mathematical limit -- so a collapsed divisor
@@ -355,7 +385,12 @@ static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_min(adce_q16_t a, adce_q16_t b) {
     return a < b ? a : b;
 }
@@ -367,7 +402,12 @@ static inline adce_q16_t adce_q16_min(adce_q16_t a, adce_q16_t b) {
  * this lane -- so nothing here has a shipping caller and that is the design.
  * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
  * as two of the three reasons the extension is load-bearing, and neither has a
- * shipping caller. The conclusion survives on the token bucket alone. */
+ * shipping caller. The third, adce_token_refill, reaches the width in its own
+ * body rather than through either of them, so the three legs are independent and
+ * only one is executed. The conclusion survives on THIS LANE BEING PUBLISHED --
+ * a consumer calling adce_q16_div at full range needs the width, and the 64-bit
+ * form inverts the sign there -- not on three shipping paths. Measured numbers
+ * are in the re-derivation entry in CLAUDE.md. */
 static inline adce_q16_t adce_q16_max(adce_q16_t a, adce_q16_t b) {
     return a > b ? a : b;
 }
@@ -376,6 +416,20 @@ static inline adce_q16_t adce_q16_max(adce_q16_t a, adce_q16_t b) {
  * Overflow-free token bucket arithmetic. Refill accumulation is computed in
  * unsigned __int128 so that (rate * elapsed) can never wrap a 64-bit lane
  * before it is clamped back down to the bucket's Q16.16 capacity.
+ *
+ * This is the ONLY site in the library that reaches 128-bit width on a path a
+ * shipping caller executes, and it reaches it here, directly -- not through
+ * adce_q16_mul or adce_q16_div, which have no shipping callers at all.
+ *
+ * AT THE SHIPPED TUNING THE WIDTH IS DEFENSIVE, NOT ACTIVE, and saying so is
+ * more useful than implying otherwise. At ADCE_ENF_RATE_Q16_PER_NS = 7 a 64-bit
+ * product first wraps at elapsed_ns = floor(2^64/7), which is 83.5 YEARS since
+ * that thread's last stage-two arrival; and the clamp below masks even that
+ * except when the wrapped value lands under capacity, a window of C/R = 38.3 ms
+ * in every 2.64e18 ns. What the width actually protects is RETUNING, which the
+ * deployment block invites: the rate at which a 64-bit lane starts to matter is
+ * 2^64/T for an idle window T -- about 586 for a year, 213504 for a day. Keep
+ * the width; it is cheap and the knob above is meant to be turned.
  * ===========================================================================
  */
 
