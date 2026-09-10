@@ -70,6 +70,10 @@ typedef struct {
  * could not be created or the claim was refused -- a refused claim means
  * another writer already owns this context, which must fail loudly at startup
  * rather than as a silently non-publishing thread. */
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the consumer starts the observer. This whole
+ * translation unit is optional by construction -- a consumer owning its own
+ * cadence drives adce_obs_epoch_close directly and never links it -- so an
+ * internal caller would make the optional half mandatory. */
 int adce_obs_thread_start(adce_obs_thread_t *t, adce_obs_counter_t *counter,
                           adce_epoch_state_t *epoch);
 

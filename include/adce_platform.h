@@ -225,6 +225,14 @@ typedef int64_t adce_q16_t;
 _Static_assert(32 + ADCE_Q16_FRAC_BITS < 64,
                "int32_t must fit the Q16.16 lane after the fractional shift");
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_from_int(int32_t v) {
     /* Shift through unsigned width. Left-shifting a negative signed value is
      * undefined (C11 6.5.7p4) regardless of what the target emits; the
@@ -236,23 +244,63 @@ static inline adce_q16_t adce_q16_from_int(int32_t v) {
 /* Rounds toward negative infinity, not toward zero: the arithmetic right
  * shift floors, and adce_q16_div is defined to match. See the rounding note
  * in adce_q16_div for why flooring is the project-wide choice. */
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline int32_t adce_q16_to_int(adce_q16_t v) {
     return (int32_t)(v >> ADCE_Q16_FRAC_BITS);
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_add(adce_q16_t a, adce_q16_t b) {
     return a + b;
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_sub(adce_q16_t a, adce_q16_t b) {
     return a - b;
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_mul(adce_q16_t a, adce_q16_t b) {
     adce_i128_t wide = (adce_i128_t)a * (adce_i128_t)b;
     return (adce_q16_t)(wide >> ADCE_Q16_FRAC_BITS);
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
     /* A zero divisor has no representable quotient. Saturate toward the
      * numerator's sign -- the mathematical limit -- so a collapsed divisor
@@ -300,10 +348,26 @@ static inline adce_q16_t adce_q16_div(adce_q16_t a, adce_q16_t b) {
     return (adce_q16_t)q;
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_min(adce_q16_t a, adce_q16_t b) {
     return a < b ? a : b;
 }
 
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the Q16.16 lane is published for consumers, who
+ * receive `pressure` in it and need arithmetic on it. The library's own use of
+ * Q16 is comparison, negation, and one private cast -- obs_unit_to_q16 in
+ * src/adce_observe.c converts the squash output directly rather than through
+ * this lane -- so nothing here has a shipping caller and that is the design.
+ * NOTE for the __int128 locked decision: it names adce_q16_mul and adce_q16_div
+ * as two of the three reasons the extension is load-bearing, and neither has a
+ * shipping caller. The conclusion survives on the token bucket alone. */
 static inline adce_q16_t adce_q16_max(adce_q16_t a, adce_q16_t b) {
     return a > b ? a : b;
 }
