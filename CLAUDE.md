@@ -1129,8 +1129,8 @@ looking.
   anywhere can change it.
 
   **The cost profiles differ in the same direction and this is what makes it landable.** The
-  boundary note fires on 71% of pull requests forever, which is why its evaluation counts
-  escape uses after ten pull requests. This check fires once per function and is then quiet
+  boundary note fires on about two thirds of pull requests forever — 19 of 28 with the
+  corrected pattern — which is why its evaluation counts escape uses after ten pull requests. This check fires once per function and is then quiet
   until the answer changes — a one-time burst of thirteen, not a recurring prompt. A
   recurring prompt gets answered by reflex, which is the failure this project condemns; a
   one-time burst does not. **No ten-PR evaluation is scheduled for this check**, deliberately,
@@ -1155,6 +1155,49 @@ looking.
   Note the asymmetry before deciding: the convention it names is still doing work even if the
   function is not. "No `double` and no `adce_rng_next_unit`" is a live rule about the
   Enforcement Plane whether or not anything calls the function.
+
+- **The boundary note skipped `include/`, and a whole plane lives there.** Recorded because
+  the hole and the way it was found both generalise.
+
+  The pattern was `^(src|test)/.*\.c$`. The ENTIRE Enforcement Plane is
+  `include/adce_enforce.h` with no `.c` file — a locked decision — so a pull request that
+  rewrote the whole plane passed the check without being asked anything. Demonstrated rather
+  than reasoned: PR #26 changed four headers and the check printed
+  `No src/*.c or test/*.c changed. Nothing to ask about.` Corrected to
+  `^(src|include|test)/.*\.(c|h)$`, which fails `ab4e5c1` — a header-only commit with
+  `CLAUDE.md` untouched — where the old pattern passed it silently.
+
+  **The hole has the same shape as the thing the check exists to catch.** The pattern was
+  written from where the code was assumed to live, `src/`, rather than from where it does
+  live. This project's layout note says in its own words that the Enforcement Plane has no
+  out-of-line surface and that a reader looking for `src/adce_enforce.c` should stop looking;
+  the check was written as though that reader had not. A predicate over file paths is only as
+  good as its author's model of the tree, and nothing in a green result distinguishes "asked
+  and answered" from "never looked".
+
+- **The 71% was a miscount, made in the commit that proposed a check against stale records.**
+  Corrected to 16 of 24 (67%) for the original pattern, and 19 of 28 (68%) for the corrected
+  one. Both re-derived by enumerating the merges commit by commit.
+
+  The error was ordinary: a list of 24 rows was printed, the firing ones counted off the
+  screen, and 16 was read as 17. Nothing about the method was wrong except that the count was
+  taken by eye and never re-run. It survived into a workflow comment, a commit message and a
+  pull request body.
+
+  **Two things follow, and the second is the one worth keeping.**
+
+  First, the correction is small and changes no conclusion: 67% and 68% are the same argument
+  as 71%, and the incidental finding is that widening the pattern did NOT make the check
+  noticeably noisier, which is the thing worth knowing before widening it.
+
+  Second, and this is the entry's reason for existing: **it happened in the commit that
+  proposed a mechanism for exactly this failure**, and the mechanism would not have caught it.
+  The internal-use check tests call edges, the boundary note tests file paths; neither tests a
+  number in a comment. This is the printed-universal rule one level up — a figure with no gate
+  behind it, drifting — and the remedy is the one already recorded: state a figure with the
+  method that re-derives it, beside the thing it describes, so the next reader can run it
+  rather than trust it. The corrected figures are now written next to the patterns that
+  produce them, which is branch 2 of that rule and not branch 1. **Nothing gates them.**
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
