@@ -7,8 +7,12 @@ publication path.
 
 - `./scripts/verify.sh` — the gate: strict build + ASan/UBSan + TSan + test run.
   A turn is not finished until all three profiles are green.
-- Quick syntax check:
-  `cc -std=c11 -O2 -Wall -Wextra -Werror -Iinclude test/t_adce_platform.c -lpthread`
+- Quick syntax check of ONE translation unit, without linking:
+  `cc -std=c11 -O2 -Wall -Wextra -Werror -Iinclude -fsyntax-only test/t_adce_platform.c`
+  `-fsyntax-only` is load-bearing, not tidiness. The earlier form omitted it and linked
+  `-lpthread`, which cannot succeed: the runner table in that file forwards to cases defined
+  in the other five test files, so the link fails on every `adce_t_*` symbol. See the scope-gap
+  entry below.
 
 ## Layout
 
@@ -741,14 +745,71 @@ looking.
   rejects N = 1, which is the quadratic's other root and is correct — alpha is 1 there, the
   EWMA has no memory, and sup z is unbounded.
 
+- **Two SCOPE GAPS, recorded as findings. Neither is resolved here, and reading either as
+  fixed would repeat the error it describes.**
+
+  **Gap one: the unverified list has gone stale in the UNDER-claiming direction three times,
+  and the cause is structural rather than inattentive.**
+
+  | # | what the list said | what was true | recorded |
+  |---|---|---|---|
+  | 1 | entry (1) at `4b83276`: `test/t_adce_loop.c` does not exist, closed-loop evidence is zero | the file landed across #10-#13 | #15 |
+  | 2 | entry (2): the aggregate ceiling under real concurrency is "runnable, untested, and the next task" | landed in #16 | #22 |
+  | 3 | the case table: "**2008 lines** with **twelve** registered cases" | 2164 lines, thirteen cases since #20 | this entry |
+
+  The third is still stale as this is written: `loop_bucket_clamp_regime` landed in #20 and is
+  absent from the table. Recording it does not fix it — the table is corrected in the same
+  commit as this entry, and the correction is not the finding.
+
+  **Three is a pattern and the cause is mechanical.** #16 and #20 each touched test files
+  ONLY, with `CLAUDE.md` untouched in both. The commit that moves the boundary and the commit
+  that records the move are in different pull requests, so the list is wrong for the whole
+  window between them — days, not minutes. No amount of care closes that window, because the
+  person who moved the boundary has already merged and gone.
+
+  **The fix is a reading of the "own commit" rule, not an exception to it.** That rule exists
+  for GATES: `scripts/verify.sh` and `scripts/hooks/` must not change in the same commit as
+  the code they check, because a gate that changes alongside its subject cannot be trusted to
+  have judged it. `CLAUDE.md` is not a gate. It checks nothing, fails nothing, and blocks
+  nothing; it is the record. So the rule it must satisfy is only that the record be separable
+  from the change for review, which a SEPARATE COMMIT INSIDE THE SAME PULL REQUEST already
+  satisfies. That preserves the rule's purpose and closes the window.
+
+  Standing instruction, therefore: a pull request that moves a boundary the unverified list
+  describes updates the list in its own commit within that same pull request. Not a later one.
+
+  **Gap two: "written is not run" was applied to code paths and never to command snippets.**
+
+  The `Quick syntax check` line in Commands does not link. It compiles
+  `test/t_adce_platform.c` alone, and that file's runner table forwards to cases defined in
+  the other five test files, so the link fails with undefined symbols for every `adce_t_*`
+  forwarder. It was written, committed, and carried through every commit since; it was never
+  run.
+
+  The scope gap is the general fact, not the one broken line. This project maintains an entire
+  list of code paths that are unexecuted by any gate, and ranks them — the Darwin
+  `getentropy` loop sits at (3) precisely because no automated gate executes it. That
+  discipline stops at the source tree. A shell command in a documentation file is code that a
+  reader will execute, and it is worse than an unexecuted source path in one specific way:
+  **a reader runs a snippet BEFORE reading the source, because running it is how they start.**
+  An unexecuted branch in `adce_platform.h` misleads nobody until it runs. A broken snippet in
+  Commands misleads the first person who tries the project.
+
+  The command is corrected in this commit. **That is the instance and not the class**, which
+  is this project's own recurring distinction: care catches the instance, only a check catches
+  the class. No check exists here. Every remaining command snippet in this document and in
+  `README.md` is in the same unverified position, and this entry does not change that.
+
 - Still unverified, in descending order of how much each would change a decision. The
   order changed on 2026-09-05, and again on 2026-09-06 after PRs #10-#14 landed the
   closed-loop harness; the reasons are stated per entry rather than left implicit.
 
   **What changed on 2026-09-06, before the entries.** The list was last written at
   `4b83276` (#9). Its entry (1) said `test/t_adce_loop.c` does not exist and that
-  closed-loop evidence is ZERO in either direction. That file is on `main` at **2008
-  lines** with **twelve** registered cases, and the statement is now false. Stale in the
+  closed-loop evidence is ZERO in either direction. That file is on `main` at **2164
+  lines** with **thirteen** registered cases, and the statement is now false. (It read
+  "2008 lines" and "twelve" until this commit -- stale since #20, which is instance 3 of
+  the scope gap recorded above.) Stale in the
   UNDER-claiming direction is still stale: it understates what is covered and so misdirects
   the next reader, which is the same defect as overstating it. What follows was read out of
   the merged tests, not out of any summary.
@@ -767,6 +828,7 @@ looking.
   | `loop_bucket_closed_form_report` | structural only: `shed == 0`, `admitted + limit == arrivals` | both candidate equalities, both error figures, the residual |
   | `loop_bucket_conservation` | `K*A == C + R*span - R*delta_0 - tau_final` on a synthetic and a real-clock arm, gated on `gaps_over_capacity == 0`; premise asserted via `shed == 0`, `stale == 0`, `limit > 0` | the floor form `A == floor((C+R*span)/K)`, REPORTED beside it and never asserted |
   | `loop_bucket_identity_teeth` | the identity predicate rejects one admission over, one under, the over-admission shape, and — same numbers, stall flag set — a stall | — |
+  | `loop_bucket_clamp_regime` | model time is owned by the rig, so the clamp regime is CONSTRUCTED: `clamp_hits == 200` as an equality, `dropped_limit == 0`, `admitted == arrivals`, and `C + R*span == K*A + L + tau` in a regime where L is large and repeated; two `_Static_assert`s pin the construction to the tuning constants | — |
 
   **Two declines are load-bearing and must not be read as gaps.** #12 narrowed case 5 to
   the Observation-plane half because a geometric ramp CANNOT drive the per-arrival path:
