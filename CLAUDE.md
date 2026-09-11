@@ -1062,6 +1062,93 @@ looking.
   **Do not resolve this by deleting the function while tidying something else.** If it is
   removed, `enf_stale_route_equivalence` loses its reference predicate and the equivalence
   argument that justified the classifier's landing has to be restated against something else.
+- **A NEW GATE'S FIRST DUTY IS TO BE SHOWN FAILING on a change it must catch, evaluated in
+  this repository's actual file layout, before it is proposed.** The standing rule the
+  `boundary-note` defect produced, and the defect itself.
+
+  `boundary-note` shipped in #24 selecting changed files with `^(src|test)/.*\.c$`. `include/`
+  was excluded, so the job was INERT for the entire Enforcement Plane — which is
+  `include/adce_enforce.h` with no `.c` file at all, by locked decision — and for the
+  header-only platform layer. PR #26 changed four headers and the job printed
+  `No src/*.c or test/*.c changed. Nothing to ask about.`
+
+  **The gate was weakest exactly where the evidence is densest.** The plane it could not see
+  is the one holding the most locked decisions in this document: the inline-only construction
+  and its RNG-stream reason, the stale-route classifier and its three counters, the
+  fail-closed future branch, the deployment tuning block, `ADCE_ENF_STALE_PRESSURE`. A
+  boundary moving there is the most likely kind to need recording and was the one kind the
+  job could not detect. That is not bad luck. The selector was written from where its author
+  assumed the code lived, and this document's own layout note says in its own words that a
+  reader looking for `src/adce_enforce.c` should stop looking.
+
+  **What was done instead of a mutation proof, and why it was not enough.** The job was
+  branch-tested when it landed: each of its four branches was driven with real SHAs and each
+  behaved correctly. Every branch was right. **Branch coverage of a script is evidence about
+  the script, not about the repository.** The defect was not in any branch; it was in the
+  premise that `src` and `test` enumerate the code, and no amount of exercising the branches
+  can reach a premise none of them tests.
+
+  So the rule, and it applies to every gate proposed here from now on: before a gate is
+  proposed, construct a change it MUST catch, in the real tree, and show it going red. A
+  green run proves nothing. A red run on a fabricated input proves nothing either if the
+  input was not shaped by the layout the gate will actually meet.
+
+  Repaired to `^(src|include|test)/.*\.(c|h)$`, with M1/M2/M3 in the gate commit's message:
+  fires on a header-only change, stays quiet on a docs-only change, and the old selector
+  produces an EMPTY MATCH on M1's file list — the last being what identifies this as the
+  repair for this hole rather than for some other one.
+
+- **How many gates in this repository check less than they appear to, and why the ordinal is
+  not asserted here.** The repair above was requested as "the fifth inert gate". That count
+  could not be reproduced from this document, so the enumeration is recorded instead of the
+  ordinal — which is this project's own rule about figures applied to its own record.
+
+  | # | gate | what it does not do | on `main`? |
+  |---|---|---|---|
+  | 1 | `CodeRabbit` | renders a pass having reviewed nothing | yes |
+  | 2 | `strict_required_status_checks_policy: false` | lets a PR merge on checks that ran against a branch behind `main` | yes |
+  | 3 | GCC's TSan | runs nowhere; every race result here is Clang's | yes |
+  | 4 | `boundary-note` | was blind to `include/`; also non-required, so its red blocks nothing | yes |
+  | 5 | `internal-use` | non-required, so its red blocks nothing | no — open in #26 |
+
+  **Four on `main` by the "exists and checks less than it appears to" rule, five if the
+  unmerged one counts, and the ordinal depends entirely on which rule is used.** Both
+  readings are defensible and neither is derivable from the document as it stood. The number
+  is left as an enumeration so the next reader can recount rather than inherit.
+
+  The pattern across all five is worth more than the count: **not one of them is wrong. Every
+  one is silent.** A gate that fails loudly gets fixed. These pass, skip, or never run, and
+  the green tick is indistinguishable from the green tick of a gate that did its job. This
+  document already records that a silently-skipping profile is worse than one that does not
+  exist; five instances say that is the default failure mode here rather than an exception.
+
+- **SECOND HOLE, NAMED AND NOT FIXED: the escape counter counts its own definition.** Found
+  while verifying that the `boundary-note` repair leaves the pre-registered evaluation intact.
+
+  The evaluation command is `git log --grep='no boundary change' --oneline main`. Run on
+  `main` today it returns **1**, and that one is `e37c33c` — the commit that PROPOSED the
+  gate, whose message explains the escape phrase twice. No escape has ever been used. The
+  instrument counts any commit that DISCUSSES the escape, including the commit that defines
+  it, and including this entry's own commit once it lands.
+
+  The count is therefore already wrong before the window has meaningfully opened, and it is
+  wrong in the direction that would retire the gate early: the pre-registered rule says a high
+  count means the check is a ritual and must be REMOVED. A self-polluting counter would build
+  the case for removal out of commits that are talking about the check rather than escaping it.
+
+  **Not fixed here**, deliberately: this pull request is scoped to the selector, and a change
+  to the evaluation instrument is a change to a pre-registered experiment, which deserves its
+  own commit and its own argument rather than being folded into a repair of something else.
+
+  **It does not affect whether the repair preserves the window.** The escape grep, phrase and
+  guidance wording are byte-identical across the repair, so the counter reads the same before
+  and after — equally wrong both sides, which is what comparability requires. What the repair
+  does change is EXPOSURE: more pull requests are now subject to the check. With zero genuine
+  escapes recorded and one of ten pull requests elapsed, there is no accumulated tally to
+  reset, so the window continues rather than restarting. If the widened population is judged
+  to be a different experiment, the window should be restarted deliberately and that decision
+  recorded here.
+
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.
