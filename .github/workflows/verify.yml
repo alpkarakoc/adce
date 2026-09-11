@@ -186,9 +186,9 @@ jobs:
   # THE BOUNDARY NOTE. Proposed, not proven -- read the risk paragraph below
   # before trusting it.
   #
-  # WHAT IT CHECKS. A pull request that changes any src/*.c or test/*.c must
-  # either change CLAUDE.md too, or say in a commit message that it did not move
-  # a boundary.
+  # WHAT IT CHECKS. A pull request that changes any src/*.c, include/*.h or
+  # test/*.c must either change CLAUDE.md too, or say in a commit message that
+  # it did not move a boundary.
   #
   # WHY IT EXISTS. The unverified list in CLAUDE.md has gone stale in the
   # UNDER-claiming direction three times: entry (1) across #10-#13, entry (2)
@@ -208,12 +208,24 @@ jobs:
   #
   # THE UNMEASURED RISK, stated rather than buried. Its false-positive rate is
   # UNKNOWN. What is known is the frequency, measured retrospectively over this
-  # repository's whole history: of 24 merges to main that touched src/*.c or
-  # test/*.c, **17 would have fired**. Of those 17, the number that had a
-  # boundary worth recording is not determinable mechanically -- it is a
-  # judgement about each change -- and the three confirmed stale-list instances
-  # are the only true positives this project can point to. So the firing rate is
-  # 71% against a demonstrated true-positive count of 3.
+  # repository's whole history and RE-DERIVED against the widened pattern, since
+  # the old figure described a pattern this job no longer uses:
+  #
+  #   pattern                             merges touched   would fire
+  #   ^(src|test)/.*\.c$   (the defect)         24              16   67%
+  #   ^(src|include|test)/.*\.(c|h)$            28              19   68%
+  #
+  # Both enumerated commit by commit rather than counted off a printed list.
+  # The original line here said "17 of 24, 71%" and that was a MISCOUNT; it is
+  # corrected in passing because leaving it would have described the replaced
+  # pattern. Widening did not make the job noticeably noisier, which is the
+  # thing worth knowing before widening it.
+  #
+  # Of the 19, the number that had a boundary worth recording is not
+  # determinable mechanically -- it is a judgement about each change -- and the
+  # three confirmed stale-list instances are the only true positives this
+  # project can point to. So the firing rate is 68% against a demonstrated
+  # true-positive count of 3.
   #
   # That ratio is NOT a false-positive rate, and reading it as one would
   # overstate the case against this check. The cost of a firing is not a red
@@ -265,9 +277,22 @@ jobs:
 
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
 
-          code="$(printf '%s\n' "$changed" | grep -E '^(src|test)/.*\.c$' || true)"
+          # include/ IS IN SCOPE and its absence was the defect. The entire
+          # Enforcement Plane is include/adce_enforce.h with no .c file at all --
+          # a locked decision -- and the platform layer is header-only, so the
+          # original ^(src|test)/.*\.c$ let a change to a whole plane through
+          # without asking. Demonstrated on PR #26: four headers changed, and
+          # this job printed "Nothing to ask about".
+          #
+          # The extension covers .h under src/ and .c under include/ as well.
+          # Neither exists today. Naming the directories and then guessing their
+          # extensions is how the first version went blind, so the pattern is
+          # written to survive a file landing where this author did not expect
+          # one.
+          code="$(printf '%s\n' "$changed" \
+                  | grep -E '^(src|include|test)/.*\.(c|h)$' || true)"
           if [ -z "$code" ]; then
-              echo "No src/*.c or test/*.c changed. Nothing to ask about."
+              echo "No shipping or test source changed. Nothing to ask about."
               exit 0
           fi
 
@@ -292,8 +317,8 @@ jobs:
           fi
 
           echo
-          echo "FAIL: this pull request changes src/*.c or test/*.c and leaves"
-          echo "      CLAUDE.md untouched."
+          echo "FAIL: this pull request changes shipping or test source and"
+          echo "      leaves CLAUDE.md untouched."
           echo
           echo "The unverified list has gone stale in the under-claiming direction"
           echo "three times, and both #16 and #20 had exactly this shape: test files"
