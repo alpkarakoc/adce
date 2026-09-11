@@ -16,8 +16,25 @@ name: verify
 on:
   push:
     branches: [main]
+
+  # NO BRANCH FILTER, deliberately. This previously read `branches: [main]`,
+  # which meant a pull request targeting anything else got NO CI AT ALL -- not a
+  # reduced set, not a skip, nothing. The three required contexts were never
+  # created, so the ruleset had nothing to wait on and `gh pr checks` printed
+  # only the one advisory tick that does not come from this workflow.
+  #
+  # THE FAILURE IS A READING FAILURE, which is why it is worth a comment rather
+  # than a one-line fix. A pull request with no checks is indistinguishable on
+  # the page from one whose checks have not started. The human reads "pending"
+  # where the truth is "never". PR #27 carried a written repair for the
+  # boundary-note selector and sat for two days in that state: the repair
+  # existed, was committed, and could not be run by any CI in this repository.
+  #
+  # The cost of removing the filter is that stacked and experimental pull
+  # requests now consume the full matrix, about two and a half minutes of
+  # runner time each. That is the correct trade: a check that cannot run is
+  # worth less than a check that costs something.
   pull_request:
-    branches: [main]
   # Nightly, because repeated execution is what finds the bugs this project
   # actually has. The phase race in the harness survived four green runs and
   # surfaced only when a 2-core runner widened the window; TSan could not have
