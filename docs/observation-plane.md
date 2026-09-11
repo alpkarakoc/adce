@@ -197,3 +197,4 @@ stops being true.
    so multi-signal needs a stated fusion rule.
 4. **Whether `ADCE_PRESSURE_MAX` is a hard clamp or a saturating counter.** A clamp discards
    overshoot magnitude, which Enforcement may want to know.
+
