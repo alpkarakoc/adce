@@ -402,3 +402,54 @@ jobs:
           echo "     say so in a commit message: 'no boundary change: <reason>'."
           echo "     Each use is counted against this check when it is evaluated."
           exit 1
+
+  # ===========================================================================
+  # THE CONTENDED-TAP MEASUREMENT. Entry (1) of CLAUDE.md's unverified list.
+  #
+  # WHY IT IS HERE RATHER THAN IN verify.sh. The per-edit gate is 48 cases in
+  # about five seconds, and CLAUDE.md records that a latency threshold on a
+  # shared runner is a flake generator. This job ASSERTS NOTHING. It prints
+  # samples and a summary, in the shape t_adce_latency.c established: measured,
+  # never asserted, with every figure carrying its n.
+  #
+  # WHY IT NEEDS CI AT ALL. The development machine is arm64 Darwin. Real
+  # x86_64 -- the shipping target -- exists nowhere else in this project's
+  # reach, and an emulated x86_64 leg would be measuring qemu's scheduler, which
+  # this repository already refuses for the pinned profile. `ubuntu-24.04-arm`
+  # additionally gives arm64 on CI HARDWARE, which CLAUDE.md ranks as the
+  # authoritative concurrency evidence over a laptop whose effective
+  # concurrency is recorded as not known.
+  #
+  # SMALLER THAN THE LOCAL SWEEP, deliberately: 2,000,000 arrivals per thread
+  # and 5 runs against the local 10,000,000 and 10. The runners are 4 vCPU, so
+  # T=8 is oversubscribed and that is reported rather than avoided. Sample
+  # counts stay adequate -- n is 5 runs times T threads per cell.
+  #
+  # NOT REQUIRED BY THE RULESET, like boundary-note and internal-use.
+  # ===========================================================================
+  tap-contention:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Toolchain and machine
+        run: |
+          uname -srm
+          echo "nproc: $(nproc)"
+          cc --version | head -1
+
+      - name: Build the benchmark under the strict profile's flags
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow \
+             -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic \
+             -Iinclude -o /tmp/tapbench bench/tap_contention.c -lpthread -lm
+
+      - name: Measure
+        run: /tmp/tapbench 2000000 5
