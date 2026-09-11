@@ -1239,6 +1239,93 @@ looking.
   request whose base is another pull request's branch now gets CI, but it is CI against a base
   that has not merged. Green there is evidence about the stack, not about `main`.
 
+- **PR #2 ASSESSED AND CLOSED: its premise was superseded, and the correction it proposed
+  points the opposite way from the one that landed.** Recorded because the branch carried a
+  measurement worth keeping and a figure that must not be inherited.
+
+  PR #2 (2026-09-04, `claude/harness-recovered-stale-bound`) proposed multiplying
+  `harness_publications_bound` by `HARNESS_STALE_BATCH`, from `dur/T + 1` to
+  `(dur/T + 1) * 256`. Its premise: `harness_stale_ingress_main` runs 256 reads with no
+  pacing inside a batch, so nothing bounds how many of them land inside ONE publication's
+  seqlock write window, and a thread's torn+future count can therefore reach a whole batch.
+  Its evidence: one observed failure at `HARNESS_PH_RECOVERED` with `stale_reads = 261`,
+  which is almost exactly the batch size.
+
+  **It rebases cleanly onto `main`. That is not the question.** The derivation does not
+  survive, on three independent grounds.
+
+  **1. The premise was answered by the route split, in the other direction.** PR #2 could not
+  classify the 261 — its own body says "Classification attempted, not obtained" — so it
+  attributed the whole count to torn/future. The classifier landed later, and
+  `harness_check_live_phase` now attributes exactly this shape to AGED: a route that needs no
+  publication at all, is bounded by ARRIVALS, and contributes 256 per batch against a bound of
+  ~31. `docs/enforcement-plane.md` §4.1 says the same. **PR #2 would have loosened the
+  torn/future bound 256-fold to accommodate a count that was not torn/future.** The landed fix
+  keeps the publication bound for the pair that genuinely needs a concurrent publication and
+  asserts `aged == 0` separately, which is tighter on both halves rather than looser on one.
+
+  **2. The bound it wanted to relax is not under strain. Measured on current `main`,
+  ADCE_REPEAT=3 under all three profiles:**
+
+  | test | unpaced batch | bound | torn+future observed |
+  |---|---|---|---|
+  | `harness_stale_posture` | 256 | 31 | **1** peak, per thread per phase |
+  | `harness_concurrent` | 1024 | 32 | **2** aggregate over four threads |
+
+  **3. It conflicts with an assertion `main` already runs, and the conflict is the
+  falsification.** `harness_concurrent` drives a **1024**-read unpaced batch — four times PR
+  #2's — against `torn + future <= publications + 1`, which is TIGHTER than the bound PR #2
+  called unhonourable. If a whole unpaced batch could straddle one write window, that
+  assertion would break first and by more. It does not break, on either architecture, under
+  TSan, across every run in this project's history.
+
+  So: **premise superseded, bound not needed, and contradicted by a stricter assertion that
+  already passes.** Closed rather than rebased.
+
+- **THE OBSERVER-EFFECT FINDING FROM PR #2 IS NOT A MEASURED NEGATIVE RESULT, and recording
+  it as one would enshrine this project's own recurring error.** Kept here because the
+  discrepancy is the part that would otherwise die with the branch.
+
+  PR #2's body reports "zero failures in 1000 combined executions against a measured ~31%
+  (154/500) baseline on the uninstrumented binary", and argues from that gap that the failure
+  is an instruction-level race rather than a coarse OS-scheduling stall — on the reasoning
+  that a starved closer would not be rescued by a few nanoseconds of unrelated code.
+
+  **`154/500` has two incompatible readings in this project's record, and PR #2 contains
+  both.**
+
+  | reading | rate | where |
+  |---|---|---|
+  | 154 failures in 500 runs | 30.8% | PR #2's own "~31%" |
+  | one failure at iteration 154 of a planned 500 | 0.65% | the entry above, and PR #2's own "the assertion failed **once**" |
+
+  The body says "the assertion failed once" and "~31% (154/500)" about the same experiment.
+  Those cannot both be true.
+
+  **The 31% reading is refuted by a measurement already in this document.** The entry above
+  re-ran the uninstrumented TSan binary 400 times, runner trimmed to `harness_stale_posture`,
+  and got zero failures. At a true rate of 30.8%, zero in 400 has probability
+  `0.692^400 ~ 1e-64`. The high reading cannot stand.
+
+  **Under either reading, no observer effect is established.** Under the 31% reading the
+  baseline is refuted. Under the 0.65% reading both arms are empty — 0/400 instrumented
+  against 0/400 uninstrumented — which is what the entry above already concludes: the
+  suppression hypothesis is unsupported rather than demonstrated.
+
+  **What follows is worth more than the arithmetic, and it is the reason to record this at
+  all.** PR #2 used that gap to DISCARD the coarse-scheduling explanation in favour of an
+  instruction-level race. The route split later attributed the event to **aged** — which is
+  the coarse-scheduling explanation exactly: an epoch that stopped advancing because the
+  closer did not publish. **The hypothesis PR #2 rejected is the one that turned out to fit,
+  and it was rejected on the strength of a figure that does not hold up.** A number with no
+  basis did not merely sit in a document here; it steered a diagnosis away from the right
+  answer.
+
+  Do not quote 31%, 154/500, or 1000 executions as rates. They join 0.067, 0.65% and 261 as
+  figures whose supporting event cannot be reproduced — the fifth instance of one observation
+  presented as a rate, and the first where the bad number changed a technical conclusion
+  rather than only a sentence.
+
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.
