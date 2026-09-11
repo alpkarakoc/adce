@@ -843,18 +843,19 @@ looking.
   conservation form mismatched zero. A reported number and an asserted one are different
   claims and the entry keeps them apart.
 
-  **(1) The contended cost of `adce_obs_tap`.** Promoted from inside the old (3) to the
-  top. Verified before promoting: `adce_obs_tap` appears NOWHERE in `test/t_adce_latency.c`,
-  and that file creates no threads at all, so the contended cost has zero evidence rather
-  than weak evidence. It is a relaxed `fetch_add` on ONE cache line shared by every ingress
-  thread, so each increment needs exclusive ownership of that line and pays a cross-core
-  transfer under contention — structurally the one per-arrival term that does not scale.
+  **(1) RETIRED — MEASURED. The contended cost of `adce_obs_tap`.** Kept in place rather
+  than deleted, because a retired entry that names its result is what stops the next reader
+  re-opening it. The measurement and the verdict on §4's bound are in the entry below. In
+  one line: the tap is a relaxed `fetch_add` on ONE shared line, its cost RISES steeply with
+  thread count, and §4's 27-59 M arrivals/s per thread is OVERTURNED for multi-threaded
+  ingress. What replaced it sits in the same entry, per host and per thread count, with n.
 
-  It ranks first because it is the term that decides whether any offered rate derived from
-  `gate + clock` is achievable, and `closed-loop-harness.md` §4 already publishes a bound —
-  27-59 M arrivals/s per thread — that it explicitly flags as an upper bound the tap may not
-  permit. Running it can invalidate a published number by an order of magnitude. Nothing
-  else on the list has that reach.
+  What remains open from this entry, and it is narrower than what it replaced: the figures
+  come from a loop doing nothing but tapping, so they are the worst case for line migration.
+  A real ingress site interleaves the gate, the clock and request work between taps, and the
+  composition used below assumes the terms ADD. Neither assumption is tested. Measuring a
+  full ingress site end to end is the successor question, and it is a smaller one — the
+  direction, the mechanism and the order of magnitude are no longer in doubt.
 
   **(2) The aggregate ceiling under real concurrency, as a two-sided identity.** Runnable,
   untested, and the next task. `loop_bucket_conservation` proves
@@ -1325,6 +1326,120 @@ looking.
   figures whose supporting event cannot be reproduced — the fifth instance of one observation
   presented as a rate, and the first where the bad number changed a technical conclusion
   rather than only a sentence.
+
+- **THE CONTENDED TAP, MEASURED. §4's 27-59 M arrivals/s per thread is OVERTURNED for
+  multi-threaded ingress, and the tap imposes a GLOBAL ceiling on observable arrivals that
+  adding threads does not raise.** Entry (1) of the unverified list, retired.
+
+  **Pre-registered before measuring**, in `bench/tap_contention.c`, committed in its own
+  commit with no numbers in it; `git log` on that file is the proof of order. Threads in
+  {1,2,4,8}; arrivals held fixed PER THREAD; a spin barrier so all threads are in the loop
+  together; median over thread-samples with min and max, never the mean, because a
+  descheduled thread is a one-sided outlier describing the host rather than the tap.
+
+  **Two arms, and the control is what makes the result attributable.** SHARED is the shipped
+  configuration — one counter, T writers. PRIVATE gives each thread its own counter: same
+  instruction, same atomic, same alignment, no sharing. If the atomic RMW itself were the
+  story both arms would rise together.
+
+  | host | n/cell | arm | T=1 | T=2 | T=4 | T=8 | T8/T1 |
+  |---|---|---|---|---|---|---|---|
+  | M3 Darwin arm64, 8 core | 10 runs | SHARED | 1.74 | 5.98 | 17.79 | 134.22 | **77x** |
+  | | | private | 1.74 | 1.77 | 1.93 | 2.13 | 1.2x |
+  | `ubuntu-24.04` x86_64, 4 vCPU | 5 runs | SHARED | 2.19 | 22.95 | 67.16 | 124.37 | **57x** |
+  | | | private | 2.20 | 2.22 | 2.39 | 3.25 | 1.5x |
+  | `ubuntu-24.04-arm` aarch64, 4 vCPU | 5 runs | SHARED | 4.22 | 14.02 | 26.92 | 48.84 | **12x** |
+  | | | private | 4.22 | 4.21 | 4.22 | 5.47 | 1.3x |
+
+  Median ns per arrival. Cell n is runs x T thread-samples, so 5 at T=1 and 40 at T=8 on CI.
+
+  **The prediction was pre-registered as hypothesis B — SHARED rises at least 3x from T=1 to
+  T=8 while PRIVATE stays flat — and it HELD on all three hosts, by 12x to 77x rather than
+  3x.** The padding works: `_Alignas(ADCE_CACHELINE)` prevents FALSE sharing, and the private
+  arm proves it by staying flat. What padding cannot prevent is TRUE sharing, and
+  `memory_order_relaxed` does not help — it removes ORDERING, not COHERENCE, so every
+  increment still migrates the line.
+
+  **THE VERDICT ON §4.** The published band is 17-37 ns per arrival from gate + clock,
+  giving 27-59 M arrivals/s per thread. Adding the measured tap to each host's own gate and
+  clock figures from `enforcement-plane.md` §5:
+
+  | host | gate+clock | T=1 | T=2 | T=4 | T=8 |
+  |---|---|---|---|---|---|
+  | M3 | 18.0 ns | 50.7 | 41.7 | 27.9 | **6.6** |
+  | x86_64 CI | 21.8 ns | 41.7 | **22.3** | **11.2** | **6.8** |
+  | arm64 CI | 36.6 ns | **24.5** | **19.7** | **15.7** | **11.7** |
+
+  M arrivals/s per thread; bold is below the published floor of 27. **On the shipping target
+  at four ingress threads — the configuration `t_adce_harness.c` actually runs — it is 11.2
+  against a published 27-59, low by 2.4x to 5.3x.** On arm64 CI the band is missed even at
+  T=1, because that host's clock alone is 30.6 ns.
+
+  **The finding that is larger than the per-thread one: aggregate throughput does not
+  scale.** Median aggregate across the SHARED arm, M arrivals/s over all threads:
+
+  | host | T=1 | T=2 | T=4 | T=8 |
+  |---|---|---|---|---|
+  | M3 | 575 | 323 | 203 | 59 |
+  | x86_64 CI | 456 | 86 | 59 | 58 |
+  | arm64 CI | 237 | 137 | 144 | 147 |
+
+  The private arm scales nearly linearly over the same sweep (M3: 576 to 3554). So the one
+  counter is a GLOBAL CEILING on how fast arrivals can be observed at all, and on two of
+  three hosts aggregate throughput DEGRADES as threads are added rather than merely
+  saturating. Adding ingress threads past two buys nothing and costs throughput.
+
+  **NO ASSERTION IS WRITTEN, and that is branch 2 rather than an omission.** A threshold on
+  any of these numbers would be a band with no derivation evaluated on a shared runner, which
+  is the failure mode this list exists to prevent — the same reason `t_adce_latency.c`
+  asserts nothing. Every figure above carries its n. Branch 3 is unavailable: the quantity is
+  a property of the host's cache coherence, and there is no construction that removes the
+  nondeterminism the way the clamp regime did.
+
+  **What this does not settle.** The loop does nothing but tap, so it is the worst case for
+  line migration; a real ingress site interleaves gate, clock and request work between taps.
+  And the composition above assumes the three terms ADD. Neither is tested here. What is no
+  longer in doubt is the mechanism, the direction, and the order of magnitude — the omitted
+  term is comparable to or larger than the entire sum §4 published, at every T >= 2 on every
+  host measured.
+
+- **THE STOPPING RULE, in force from 2026-09-11.** The next three MERGED pull requests move
+  the library's evidence boundary. No exceptions, including "small" documentation corrections
+  and including defects found in the apparatus, which are FILED in the list rather than
+  fixed. The sole exception is a defect that renders a REQUIRED check inert — required
+  meaning the three ruleset contexts, `sanitizers (ubuntu-24.04)`,
+  `sanitizers (ubuntu-24.04-arm)` and `shipping-target` — because that invalidates the
+  evidence the three are producing. A defect in `boundary-note` or `internal-use` does not
+  qualify; both are advisory.
+
+  **If a fourth apparatus pull request merges before three evidence ones do, record that the
+  stopping rule failed and treat the failure as the finding.**
+
+  Count at the time of writing: this is the FIRST. Two remain, and the list's own ranking
+  names them — the Darwin half of `adce_platform_get_entropy`, which is the only whole code
+  path no automated gate executes, and the seqlock retry path's cost.
+
+  **The rule has no gate behind it and is self-policed**, which is exactly the class this
+  document condemns elsewhere. Nothing goes red on a fourth apparatus merge. That is stated
+  rather than hidden, and the failure clause is the only enforcement there is.
+
+  Recording the rule could not have its own pull request without consuming one of the three
+  slots on its first move, which is why it rides in this commit. Filings work the same way:
+  they accumulate and land with the next evidence pull request.
+
+- **FILED, NOT FIXED, under the stopping rule.** Two apparatus defects found and deliberately
+  left alone.
+
+  1. **Entry (2) of the unverified list is stale, and has been since #16.** It still reads
+     "Runnable, untested, and the next task" for the aggregate ceiling under real concurrency.
+     That landed in #16: `harness_concurrent` asserts `harness_bucket_identity` per thread and
+     the two-sided aggregate identity. This is the FOURTH time the list has gone stale in the
+     under-claiming direction, and the first time it has been left stale on purpose.
+  2. **The `boundary-note` selector does not cover `bench/`.** The pattern is
+     `^(src|include|test)/.*\.(c|h)$`, and this pull request creates `bench/tap_contention.c`,
+     which it cannot see. Same shape as the `include/` hole repaired in #29 — a selector
+     written from where the code was assumed to live — and found the same way, by adding code
+     somewhere its author had not considered.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
