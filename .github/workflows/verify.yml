@@ -16,8 +16,25 @@ name: verify
 on:
   push:
     branches: [main]
+
+  # NO BRANCH FILTER, deliberately. This previously read `branches: [main]`,
+  # which meant a pull request targeting anything else got NO CI AT ALL -- not a
+  # reduced set, not a skip, nothing. The three required contexts were never
+  # created, so the ruleset had nothing to wait on and `gh pr checks` printed
+  # only the one advisory tick that does not come from this workflow.
+  #
+  # THE FAILURE IS A READING FAILURE, which is why it is worth a comment rather
+  # than a one-line fix. A pull request with no checks is indistinguishable on
+  # the page from one whose checks have not started. The human reads "pending"
+  # where the truth is "never". PR #27 carried a written repair for the
+  # boundary-note selector and sat for two days in that state: the repair
+  # existed, was committed, and could not be run by any CI in this repository.
+  #
+  # The cost of removing the filter is that stacked and experimental pull
+  # requests now consume the full matrix, about two and a half minutes of
+  # runner time each. That is the correct trade: a check that cannot run is
+  # worth less than a check that costs something.
   pull_request:
-    branches: [main]
   # Nightly, because repeated execution is what finds the bugs this project
   # actually has. The phase race in the harness survived four green runs and
   # surfaced only when a 2-core runner widened the window; TSan could not have
@@ -236,16 +253,54 @@ jobs:
   # project records that a silently-skipping profile is worse than one that does
   # not exist; a gate escaped by habit is the same defect wearing a green tick.
   #
-  # THE EVALUATION, fixed in advance so the result cannot be chosen afterwards.
-  # After TEN pull requests subject to this check, count the escape uses:
+  # THE EVALUATION. Fixed in advance so the result cannot be chosen afterwards,
+  # and RESTARTED AT ZERO by the commit that repairs the instrument below.
   #
-  #     git log --grep='no boundary change' --oneline main
+  # Count the escape uses with:
   #
-  # If that count is high -- most of the ten -- the check is a ritual and must be
-  # REMOVED, with the removal recorded as a negative result in CLAUDE.md the way
-  # the printed-universal grep audit was. It is not to be kept because removing
-  # it would look like retreat. If the count is low and the list stayed current,
-  # it earned its place and the ruleset should be updated to require it.
+  #     git log -i -E --grep='^no boundary change: *[^[:space:]]' --oneline main
+  #
+  # The strict form is the same predicate the job's escape branch uses, so the
+  # thing that lets a pull request through and the thing that counts it are one
+  # predicate and cannot drift apart.
+  #
+  # THE PREVIOUS COMMAND WAS BROKEN FROM THE DAY IT WAS WRITTEN. It was
+  # `git log --grep='no boundary change' --oneline main`, which matches any
+  # commit that DISCUSSES the escape. On the day the repair landed it returned
+  # TWO, and neither was an escape: e37c33c, the commit that proposed this gate
+  # and explains the phrase twice, and 898c293, the commit that repaired the
+  # selector and discussed the phrase again. No escape has ever been used. The
+  # instrument was incrementing once per commit that talked about it, and it
+  # errs toward RETIRING the gate, because a high count triggers removal.
+  #
+  # WHY THE WINDOW RESTARTS AT ZERO rather than carrying its tally forward.
+  # Three reasons, and the third alone is sufficient.
+  #
+  #   1. The population changed. The selector went from ^(src|test)/.*\.c$ to
+  #      ^(src|include|test)/.*\.(c|h)$ in 898c293, and retrospectively that is
+  #      16 of 24 merges firing against 19 of 28. Different denominator,
+  #      different experiment.
+  #   2. The instrument changed. A pre-registration whose instrument is adjusted
+  #      mid-run and whose tally is kept is not a pre-registration; it is a
+  #      result chosen after the fact with a procedural label on it.
+  #   3. The window was NEVER VALID. Its counting command was broken from the
+  #      day it was written, so there was never a tally to carry -- only a number
+  #      that grew when people wrote about the check.
+  #
+  # THE WINDOW, restated: TEN CODE-TOUCHING pull requests merged to main after
+  # the instrument repair lands. Code-touching means the selector matched, i.e.
+  # this job did not take its quiet branch. That is countable from the
+  # repository alone by replaying the selector over the merges:
+  #
+  #     git log --format=%h --first-parent main | while read h; do \
+  #       git show --name-only --format= "$h" \
+  #       | grep -qE '^(src|include|test)/.*\.(c|h)$' && echo "$h"; done
+  #
+  # If the escape count is high -- most of the ten -- the check is a ritual and
+  # must be REMOVED, with the removal recorded as a negative result in CLAUDE.md
+  # the way the printed-universal grep audit was. It is not to be kept because
+  # removing it would look like retreat. If the count is low and the list stayed
+  # current, it earned its place and the ruleset should be updated to require it.
   #
   # NOT REQUIRED BY THE RULESET, and this is a real gap rather than an oversight.
   # The ruleset on main requires exactly three contexts -- sanitizers
@@ -305,10 +360,22 @@ jobs:
               exit 0
           fi
 
-          # The escape. Searched across every commit message in the range,
-          # -i because the phrase is a sentence and not a token.
+          # The escape, in its STRICT form. It must be the whole start of a
+          # line, followed by a colon and a non-empty reason:
+          #
+          #     no boundary change: <reason>
+          #
+          # The first version matched the bare phrase anywhere in any commit
+          # message in the range, which meant a commit that merely DISCUSSED
+          # the escape satisfied the gate. That is the same defect as the
+          # counting command's, on the enforcement side rather than the
+          # measurement side, and repairing one without the other would leave
+          # them disagreeing: a message could pass the gate and not be counted.
+          # Column 1 is required deliberately -- quoted or indented prose does
+          # not escape anything, and an escape that is not seen leaves the gate
+          # RED, which is the safe direction.
           if git log --format='%B' "$BASE_SHA".."$HEAD_SHA" \
-                 | grep -qi 'no boundary change'; then
+                 | grep -qiE '^no boundary change: *[^[:space:]]'; then
               echo
               echo "ESCAPE USED: a commit in this range says 'no boundary change'."
               echo "This is one tally mark against the check. See the evaluation"

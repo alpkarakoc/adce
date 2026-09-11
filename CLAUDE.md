@@ -1149,6 +1149,96 @@ looking.
   to be a different experiment, the window should be restarted deliberately and that decision
   recorded here.
 
+- **THE ESCAPE PREDICATE COUNTED PROSE, AND IT DID SO ON BOTH SIDES OF THE GATE.** The
+  `boundary-note` evaluation instrument, repaired, and the pre-registered window restarted.
+
+  **Only half the defect had been named.** The counting command was
+  `git log --grep='no boundary change' --oneline main`, which matches any commit that
+  DISCUSSES the escape. The job's own escape branch carried the identical looseness —
+  `grep -qi 'no boundary change'` over every message in the range — so **a commit that merely
+  talked about the escape SATISFIED THE GATE.** Repairing the counter alone would have left
+  the two disagreeing, with a message able to pass the check and not be counted. Both now run
+  one predicate.
+
+  **The instrument was degrading in plain sight, and the direction is the bad one.** It
+  returned 1 when the hole was first named and 2 a day later: `e37c33c`, which proposed the
+  gate and explains the phrase twice, and `898c293`, which repaired the selector and discussed
+  the phrase again. Every commit written in defence of the check incremented it, and a HIGH
+  count triggers REMOVAL — so the instrument was assembling the case to retire the gate out of
+  the commits arguing for it. Under the strict predicate `main` reads **0**, which is the
+  truth: no escape has ever been used.
+
+  **The strict form**, in column 1, with a colon and a non-empty reason. Quoted or indented
+  prose escapes nothing, and an escape that is not seen leaves the gate RED, which is the safe
+  direction.
+
+  | | predicate |
+  |---|---|
+  | job | `grep -qiE '^no boundary change: *[^[:space:]]'` |
+  | counter | `git log -i -E --grep='^no boundary change: *[^[:space:]]' --oneline main` |
+
+  Mutation-proved both directions against real commits. A probe carrying a genuine escape is
+  counted by the new command and passes the job; a probe that only discusses the mechanism is
+  NOT counted, and — the part that matters — passes the OLD job while the NEW job holds the
+  gate red at exit 1.
+
+  **THE WINDOW RESTARTS AT ZERO: ten CODE-TOUCHING pull requests merged after the repair
+  lands.** Three reasons, and the third alone is sufficient.
+
+  1. **The population changed.** The selector went from `^(src|test)/.*\.c$` to
+     `^(src|include|test)/.*\.(c|h)$`, retrospectively 16 of 24 merges firing against 19 of 28.
+     A different denominator is a different experiment.
+  2. **The instrument changed.** A pre-registration whose instrument is adjusted mid-run and
+     whose tally is kept is not a pre-registration; it is a result chosen after the fact with a
+     procedural label on it.
+  3. **The window was NEVER VALID.** Its counting command was broken from the day it was
+     written, so there was never a tally to carry — only a number that grew when people wrote
+     about the check. Reasons 1 and 2 describe a window being invalidated. This one says there
+     was nothing to invalidate.
+
+  "Code-touching" now has a definition rather than a reading: the selector matched, i.e. the
+  job did not take its quiet branch. The workflow comment carries the command that replays the
+  selector over merges, so the denominator is countable from the repository instead of
+  remembered.
+
+- **"WRITTEN IS NOT RUN", THIRD INSTANCE, AND THE WORST-SHAPED ONE: a pull request that CI
+  cannot structurally reach.** The first two instances were an unexecuted committed code path
+  (the Darwin `getentropy` loop) and an unexecuted command snippet (the quick syntax check).
+  This one is different in kind.
+
+  `pull_request: branches: [main]` meant a pull request targeting any other branch received
+  **no CI at all** — not a reduced set, not a skip, nothing. The three required contexts were
+  never created, so the ruleset had nothing to wait on.
+
+  **What separates it from the other two: choosing does not fix it.** An unexecuted branch in
+  `adce_platform.h` and a broken snippet in Commands both sit in the tree, and anyone who
+  decides to run them can. Here the work is written, committed, pushed and visible on a page,
+  and no amount of choosing runs it. The gap is not in what was executed but in what was
+  reachable.
+
+  **And it reads as PENDING rather than as IMPOSSIBLE.** A pull request with no checks is
+  indistinguishable on the page from one whose checks have not started. PR #27 held a written
+  repair for the `boundary-note` selector and sat in that state for two days:
+
+      $ gh pr checks 27
+      CodeRabbit  pass  0  Review skipped: reviews are disabled for this base branch
+
+  One advisory tick that does not come from this workflow, and not one of the three required
+  contexts. The page does not say "these cannot run here". It says nothing, and nothing reads
+  as "not yet". That is the same defect class this document already ranks worst — a
+  silently-skipping profile — arriving through the CI configuration rather than through a
+  script.
+
+  Repaired by dropping the branch filter, and mutation-proved with a throwaway pull request
+  against a non-main base: zero of the three required contexts before, all three plus
+  `boundary-note` after. The cost is that stacked and experimental pull requests now consume
+  the full matrix, about two and a half minutes each. **A check that cannot run is worth less
+  than a check that costs something.**
+
+  Note what this does NOT fix, because the stack in #26-#28 is the standing example: a pull
+  request whose base is another pull request's branch now gets CI, but it is CI against a base
+  that has not merged. Green there is evidence about the stack, not about `main`.
+
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
   truncated quotient down when the remainder is non-zero and the operand signs differ.
