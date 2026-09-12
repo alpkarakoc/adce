@@ -453,3 +453,41 @@ jobs:
 
       - name: Measure
         run: /tmp/tapbench 2000000 5
+
+  # ===========================================================================
+  # THE SEQLOCK RETRY MEASUREMENT. Entry (4) of CLAUDE.md's unverified list.
+  # Same shape and same reasoning as tap-contention above: it ASSERTS NOTHING,
+  # it exists because real x86_64 and arm64-on-CI-hardware are reachable nowhere
+  # else in this project, and it is not in verify.sh because the per-edit gate
+  # must stay at seconds. Not required by the ruleset.
+  #
+  # Shorter than the local sweep -- 100 ms per cell and 3 runs against the local
+  # 300 ms and 10 -- because the runners are 4 vCPU and the interesting cells
+  # are the four-reader ones, which saturate quickly.
+  # ===========================================================================
+  seqlock-retry:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Toolchain and machine
+        run: |
+          uname -srm
+          echo "nproc: $(nproc)"
+          cc --version | head -1
+
+      - name: Build under the strict profile's flags
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow \
+             -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic \
+             -Iinclude -o /tmp/sqbench bench/seqlock_retry.c -lpthread -lm
+
+      - name: Measure
+        run: /tmp/sqbench 100000000 3
