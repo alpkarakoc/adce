@@ -883,12 +883,19 @@ looking.
   read-only-observer argument from #6 applies and must be stated rather than assumed, since
   that file already distinguishes observers from drains.
 
-  **(3) The Darwin half of `adce_platform_get_entropy`** — the `getentropy` chunking loop —
-  has no automated coverage at all. Re-checked: `.github/workflows/verify.yml` runs
-  `ubuntu-24.04` and `ubuntu-24.04-arm` only, so CI takes the `getrandom` branch and no job
-  runs macOS, which is the platform the per-edit gate runs on. It stays above the two
-  runnable entries below because it is the only entry where a whole code path is unexecuted
-  by any automated gate.
+  **(3) RETIRED — EXECUTED AND GATED. The Darwin half of
+  `adce_platform_get_entropy`.** The entry was also WRONG about what the gap was, and the
+  correction is the useful part: that arm was never unexecuted. `adce_rng_seed` calls
+  `ADCE_GET_ENTROPY` on first use of the RNG, so every local gate execution on Darwin has
+  always entered it. What no shipping path reached was the CHUNKING — the only caller asks
+  for 16 bytes, 16 <= 256, so the clamp was never taken and the loop never iterated twice,
+  in a function whose own comment calls the chunking "mandatory, not defensive".
+
+  Closed by `test_platform_entropy` in `test/t_adce_platform.c`, which is a CONTROL rather
+  than a measurement: it runs in all three `verify.sh` profiles, drives six lengths straddling
+  the 256-byte limit, and asserts four properties. Details and the mutation proof are in the
+  entry below. What remains uncovered and is NOT claimed: the Linux arm's `EINTR` and
+  short-read retries, which need a signal to provoke.
 
   **(4) The seqlock retry path has never been timed.** The other half of the old (3), left
   behind when the tap was promoted out of it. §5 of `docs/enforcement-plane.md` measures the
@@ -1403,6 +1410,141 @@ looking.
   term is comparable to or larger than the entire sum §4 published, at every T >= 2 on every
   host measured.
 
+- **DESIGN CONSEQUENCE, PROPOSED AND NOT IMPLEMENTED: the Ingest Plane's single shared
+  counter is a scaling defect, and the Enforcement Plane already took the opposite decision
+  on the same question.** The evidence is the entry above; nothing here is built.
+
+  **The measurement, restated as the design claim it supports.** Aggregate tap throughput on
+  `ubuntu-24.04` x86_64, median over 5 runs per cell, M arrivals/s over all threads:
+
+  | arm | T=1 | T=2 | T=4 | T=8 |
+  |---|---|---|---|---|
+  | SHARED — one counter, the shipped configuration | 456 | 86 | 59 | 58 |
+  | private — one counter per thread, the control | 454 | 709 | 1638 | 1485 |
+
+  The shared arm loses 87% of its throughput between one thread and two and never recovers.
+  The private arm rises to 1638 at T=4, which is the runner's core count, and dips to 1485 at
+  T=8 where 4 vCPU are oversubscribed — so it is near-linear up to the hardware and then
+  flat, which is what a design without a shared line looks like. On the 8-core M3 the private
+  arm is near-linear across the whole sweep, 576 to 3554.
+
+  **What is duty-cycle dependent and what is not, stated separately because conflating them
+  would overclaim.** The benchmark taps back to back, which is the WORST case for line
+  migration; a real ingress site puts the gate, the clock and request work between taps, and
+  the per-tap penalty there will be smaller. **The MAGNITUDE is therefore not transferable.
+  The SIGN is.** At any duty cycle, a shared line makes every increment pay for ownership
+  transfer that private counters do not pay, and the rate at which one line can change hands
+  is a ceiling that private counters do not have. Sharing is never the better arrangement at
+  any duty cycle; only the size of the gap moves. The comparison that holds is SHARED against
+  PRIVATE at a fixed duty cycle, not T=1 against T=8 at fixed sharing — at a low enough duty
+  cycle the shared arm does still scale, because the line is not saturated, and saying
+  otherwise would be the stronger claim the measurement does not support.
+
+  **THE TWO PLANES MADE OPPOSITE CHOICES ON THE SAME QUESTION, and only one of them is
+  measured.** `adce_enf_ctx_t` carries the comment "Per-thread. Never shared, so none of
+  these fields is atomic" — the Enforcement Plane gives every ingress thread a private,
+  non-atomic bucket and aggregates off the hot path, which is why
+  `harness_concurrent` has to sum per-thread spans after `pthread_join` to write the
+  aggregate identity down at all. The Observation Plane does the reverse: one
+  `_Atomic uint64_t`, written by every ingress thread, on the arrival path. Same question,
+  opposite answers, and the plane that chose sharing is the one with the measured ceiling.
+
+  Neither choice was wrong when made — the Enforcement Plane needs per-thread state because a
+  token bucket IS per-thread policy, and the Observation Plane needs one number because the
+  statistic is global. What the measurement shows is that "the statistic is global" does not
+  require "the counter is global".
+
+  **CANDIDATE FIX, described so it can be argued with rather than to reserve the decision:**
+  per-thread tap counters, summed at epoch close. `adce_obs_counter_take` is already called
+  exactly once per epoch from inside `adce_obs_epoch_close`, on the observer thread, off the
+  arrival path. Summing T counters there instead of exchanging one is O(T) work in a place
+  that already runs off the hot path, once per `ADCE_OBS_EPOCH_NS` — 10 ms — against a
+  per-arrival cost paid millions of times per second. The hot path loses its shared line
+  entirely.
+
+  **NOT IMPLEMENTED, and it must not be picked up as tidying.** Three reasons, each
+  sufficient on its own.
+
+  1. It changes `adce_obs_counter_t`, `adce_obs_tap` and `adce_obs_epoch_close` — a public
+     type, the per-arrival API and the producer. That is an ARCHITECTURE change and the
+     working agreement requires it to be proposed and waited on, not folded into a step whose
+     stated scope was measurement.
+  2. It is not evidence. It would move no boundary on the unverified list, so under the
+     stopping rule it does not belong in the three-pull-request window.
+  3. The design questions it opens are not answered here: how a consumer registers a thread's
+     counter, what happens when threads outnumber a fixed array, whether the overrun identity
+     `total_tapped == arrivals_closed + discarded + residual` survives T drains instead of
+     one, and whether the harness's tap-before-gate assertions still read the same counter.
+     None of those is hard; none of them is decided.
+
+  **It becomes item one after the three-pull-request window closes.** Recorded now because
+  the evidence that motivates it is fresh and adjacent, and a design consequence discovered
+  during a measurement is exactly the thing that evaporates if it is not written down at the
+  moment it is found.
+
+- **THE ENTROPY SYSCALL, EXECUTED AND GATED. The deliverable is a CONTROL, not a
+  measurement, and the entry it retires was wrong about its own gap.** Entry (3) of the
+  unverified list.
+
+  **What the gap actually was.** The list said the Darwin arm "has no automated coverage at
+  all" and that it is "the only entry where a whole code path is unexecuted by any automated
+  gate". The second half is false and was false when written. `adce_rng_seed` calls
+  `ADCE_GET_ENTROPY` on first use of the RNG, so every local gate execution on Darwin has
+  always entered that function. Re-derived from the source rather than from the list, which
+  is the only reason it surfaced.
+
+  **What was genuinely unreached is narrower and worse.** The only shipping caller asks for
+  `sizeof(buf) == 16` bytes. 16 <= 256, so the clamp `if (chunk > 256U) chunk = 256U;` has
+  never been taken by any caller on any host, and the loop has never iterated more than once —
+  in a function whose own comment states that "the chunking loop is mandatory, not defensive".
+  The code that exists solely to handle the 256-byte limit was the code nothing ran.
+
+  **Why this is a control where the tap was a measurement.** The tap's contended cost is a
+  property of the host's cache coherence: a threshold on it would be a band with no
+  derivation, so it went to branch 2 with its n. This one is BINARY — the syscall either
+  fills the request or it does not — so it is assertable, and branch 1 applies. That is the
+  distinction the two entries turn on, and it is why one produced numbers and the other
+  produced a gate.
+
+  **`test_platform_entropy`**, in `test/t_adce_platform.c`, running in all three `verify.sh`
+  profiles. Six lengths straddling the limit — 16, 255, 256, 257, 512, 1000 — where 257 is the
+  smallest input that forces a second chunk. Four properties, and only the first is a smoke
+  test:
+
+  | # | property | what it catches |
+  |---|---|---|
+  | 1 | the call reports success | the syscall failing outright |
+  | 2 | every byte inside the request is written, checked PER 256-BYTE REGION | a loop that fills one chunk and stops — a whole-buffer check would pass on the first chunk alone |
+  | 3 | no byte past the request is touched | an off-by-one in the chunk arithmetic |
+  | 4 | two successive fills differ | a stub returning 0 without writing |
+
+  **The one assumption, stated rather than buried.** "Written" is inferred from a poison byte
+  being gone, and genuine entropy can produce the poison value. Per 16-byte region that is
+  `256^-16`, about 1e-39, and no region checked is smaller than 16 bytes. It is a
+  probabilistic argument and the case says so in its own comment.
+
+  **PLATFORM-AGNOSTIC BY CONSTRUCTION.** The case contains zero preprocessor conditionals, so
+  it exercises whichever arm the host compiled: real chunking on Darwin, `getrandom` at the
+  same sizes on Linux. **Not claimed and still uncovered:** the Linux arm's `EINTR` and
+  short-read retries, which need a signal to provoke. Entry (3) is retired for the chunking,
+  not for that.
+
+  **MUTATION-PROVED THREE WAYS**, each producing an attributing message rather than a bare
+  assertion number: chunking stopped after one chunk gives
+  `left bytes [256,512) entirely unwritten`; one byte past the request gives
+  `wrote past the request at offset 257 (0xFF, expected 0x5A)`; and a stub returning success
+  without writing gives `left bytes [0,16) entirely unwritten`.
+
+  **One mutation had to be narrowed, and that is recorded because it is instructive rather
+  than tidy.** An unconfined overrun — one byte past on EVERY call — smashes `adce_rng_seed`'s
+  16-byte stack buffer and the stack protector aborts at exit 134 before this case ever runs.
+  That is a real detection, by a different mechanism, and it would have let this case take
+  credit for a catch that was not its own. The mutation was confined to `len > 256` until the
+  case is demonstrably the thing that catches it.
+
+  **No shipping translation unit changed.** `include/` and `src/` are byte-identical to
+  `main`, so the Linux arm cannot have been affected and R4's propose-and-wait never arises.
+
 - **THE STOPPING RULE, in force from 2026-09-11.** The next three MERGED pull requests move
   the library's evidence boundary. No exceptions, including "small" documentation corrections
   and including defects found in the apparatus, which are FILED in the list rather than
@@ -1415,9 +1557,9 @@ looking.
   **If a fourth apparatus pull request merges before three evidence ones do, record that the
   stopping rule failed and treat the failure as the finding.**
 
-  Count at the time of writing: this is the FIRST. Two remain, and the list's own ranking
-  names them — the Darwin half of `adce_platform_get_entropy`, which is the only whole code
-  path no automated gate executes, and the seqlock retry path's cost.
+  Count: this pull request is the SECOND. One remains, and the list's own ranking names it —
+  the seqlock retry path's cost, entry (4), executed under `test_harness_concurrent` with
+  only its COST unmeasured. Entry (1) was retired by #33 and entry (3) by this pull request.
 
   **The rule has no gate behind it and is self-policed**, which is exactly the class this
   document condemns elsewhere. Nothing goes red on a fourth apparatus merge. That is stated
@@ -1427,8 +1569,8 @@ looking.
   slots on its first move, which is why it rides in this commit. Filings work the same way:
   they accumulate and land with the next evidence pull request.
 
-- **FILED, NOT FIXED, under the stopping rule.** Two apparatus defects found and deliberately
-  left alone.
+- **FILED, NOT FIXED, under the stopping rule.** Apparatus defects found and deliberately
+  left alone. Items 3 and 4 were added by the entropy pull request, and item 4 BLOCKS it.
 
   1. **Entry (2) of the unverified list is stale, and has been since #16.** It still reads
      "Runnable, untested, and the next task" for the aggregate ceiling under real concurrency.
@@ -1440,6 +1582,68 @@ looking.
      which it cannot see. Same shape as the `include/` hole repaired in #29 — a selector
      written from where the code was assumed to live — and found the same way, by adding code
      somewhere its author had not considered.
+  3. **A commit on `main` was attempted, for the second time from the same root cause.** The
+     session-start status line said the branch was `evidence-tap-contention`; by the time the
+     write happened that branch had been merged and squashed, and the working branch was
+     `main`. The line was trusted at write time instead of re-derived. A `git commit --amend`
+     then rewrote `73eff8f`, the squashed merge of #33, locally.
+
+     **The damage was contained by the ruleset, not by discipline**, and that distinction is
+     the whole reason this is filed rather than shrugged off. `non_fast_forward` on `main`
+     would have rejected the push; the reset that undid it was caught by reading `git log`
+     after the fact, not before. Nothing reached the remote and `origin/main` was never
+     touched, which was luck wearing a control's clothing.
+
+     **The candidate control is a pre-commit hook refusing commits on `main`.**
+     `scripts/hooks/` already exists and carries `post-edit-build.sh` and `stop-verify.sh`, so
+     there is a home for it and a precedent for the mechanism. Its false-positive rate is
+     structurally ZERO rather than merely low: the ruleset makes `main` unpushable by direct
+     commit, so every piece of work in this repository is branch-based by construction and a
+     commit on `main` is never the intended act. That is a better profile than either gate
+     proposed so far — the boundary note fires on about two thirds of pull requests forever,
+     and the internal-use check fires once per function.
+
+     NOT BUILT, because it is apparatus and this is an evidence pull request. It is the
+     candidate to reach for first once the window closes, ahead of the tap redesign, on the
+     grounds that it costs nothing and this is the second instance.
+
+  4. **The ran-tests guard breaks when stdout and stderr interleave, and it is a FALSE RED
+     rather than a silent pass.** Surfaced by this pull request, created by neither it nor the
+     change it carries.
+
+     Both gates merge the two streams and then demand an exact whole-line match:
+
+         2>&1 | tee "$log"                      # verify-linux-gcc.sh:232
+         grep -qxF "TEST OK: $name" "$log"      # verify-linux-gcc.sh:191, verify.sh:120
+
+     stdout through `tee` is block-buffered and stderr is unbuffered, so a stderr write can
+     land inside a half-flushed stdout line. This document already records that the two
+     streams cannot be ordered against each other — it is why the teeth banners were moved to
+     stderr with a BEGIN/END fence. What was not noticed is that the guard's `-x` makes a
+     SPLIT line indistinguishable from an ABSENT one.
+
+     Observed on `shipping-target`, linux/amd64, run 34649... : the binary printed
+     `All tests passed`, `loop_draw_invariance` ran and passed, and the log carries the
+     orphan fragment `_draw_invariance` on its own line where `TEST OK: loop_draw_invariance`
+     should be. The guard then reported `defines test_loop_draw_invariance, but it never ran`.
+     Both the plain strict leg and the pinned leg failed the same way; arm64 and every
+     `verify.sh` profile passed.
+
+     **This pull request did not cause it and cannot have.** It adds one `printf` early in the
+     run, which moves where the 4 KiB stdout buffer flushes; the interleaving it exposes has
+     been latent since the guard was written. The defect is that a passing suite can be
+     reported as an unrun test by an output artefact.
+
+     **It is a false RED, not an inert check**, so it does NOT meet the stopping rule's sole
+     exception, which covers a defect that renders a required check inert. It is filed here
+     unfixed and it BLOCKS this pull request, because `shipping-target` is required. Stating
+     that plainly is better than tuning anything until it goes green, which is the failure
+     this project has an entry about.
+
+     The candidate fixes, unranked because choosing between them is the fix and this is the
+     filing: keep the two streams in separate files and run the guard against stdout alone;
+     or relax `-qxF` to a line-anchored match tolerant of a leading fragment; or have the
+     runner emit its manifest to a third descriptor that nothing else writes.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the

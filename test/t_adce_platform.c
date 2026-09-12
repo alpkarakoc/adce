@@ -191,6 +191,141 @@ static int test_rng(void) {
     return 0;
 }
 
+/* The kernel entropy syscall behind ADCE_GET_ENTROPY, executed and gated.
+ *
+ * WHY THIS EXISTS, and it is narrower than "the Darwin arm never runs". That
+ * arm DOES run on this host: adce_rng_seed calls ADCE_GET_ENTROPY on first use
+ * of the RNG, so every gate execution on Darwin already enters the function.
+ * What no shipping path reaches is the CHUNKING, and its own comment calls it
+ * mandatory rather than defensive:
+ *
+ *     getentropy() is all-or-nothing per call but refuses any request over 256
+ *     bytes, so the chunking loop is mandatory, not defensive.
+ *
+ * The only shipping caller asks for sizeof(buf) == 16 bytes. 16 <= 256, so the
+ * clamp `if (chunk > 256U) chunk = 256U;` has never been taken by any caller on
+ * any host, and the loop has never iterated more than once. A defect in that
+ * arithmetic -- an off-by-one, a chunk that never advances, a second chunk left
+ * unwritten -- is invisible to the whole suite and to production.
+ *
+ * This case is deliberately PLATFORM-AGNOSTIC. It names neither __APPLE__ nor
+ * __linux__ and carries no #ifdef, so it exercises whichever arm the host
+ * compiled. On Darwin that drives the chunking loop for real; on Linux it
+ * drives getrandom at the same sizes. What it does NOT claim to cover is the
+ * Linux arm's EINTR and short-read retries, which need a signal to provoke and
+ * are untouched here.
+ *
+ * FOUR PROPERTIES, and only the first is a smoke test:
+ *
+ *   1. the call reports success;
+ *   2. every byte inside the request is written -- checked PER 256-BYTE REGION,
+ *      so a loop that fills the first chunk and stops is caught where a
+ *      whole-buffer check would pass on the first chunk alone;
+ *   3. no byte past the request is touched, which is what catches an off-by-one
+ *      in the chunk arithmetic;
+ *   4. two successive fills differ, so a stub returning 0 without writing
+ *      cannot pass.
+ *
+ * ON THE POISON TEST AND ITS ONE ASSUMPTION. "Written" is inferred from the
+ * poison byte being gone, and genuine entropy can legitimately produce the
+ * poison value. Per 16-byte region the odds of an all-poison result are
+ * 256^-16, about 1e-39. That is a probabilistic argument and it is stated
+ * rather than hidden; the regions checked are never smaller than 16 bytes. */
+#define ENTROPY_POISON 0xA5u
+#define ENTROPY_GUARD  0x5Au
+#define ENTROPY_MAX    1024u
+
+/* Returns 1 when at least one byte in [lo,hi) differs from the poison. */
+static int entropy_region_written(const uint8_t *b, size_t lo, size_t hi) {
+    size_t i;
+    for (i = lo; i < hi; ++i) {
+        if (b[i] != (uint8_t)ENTROPY_POISON) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_platform_entropy(void) {
+    /* Lengths chosen around the 256-byte getentropy limit: below it, exactly
+     * on it, one past it -- which is the smallest input that forces a second
+     * chunk -- and well past it, which forces four. */
+    static const size_t lens[] = {16u, 255u, 256u, 257u, 512u, 1000u};
+    static uint8_t buf[ENTROPY_MAX];
+    static uint8_t prev[ENTROPY_MAX];
+    size_t k;
+
+    for (k = 0; k < sizeof(lens) / sizeof(lens[0]); ++k) {
+        size_t len = lens[k];
+        size_t off;
+        int rc;
+
+        memset(buf, ENTROPY_POISON, sizeof(buf));
+        memset(buf + len, ENTROPY_GUARD, sizeof(buf) - len);
+
+        rc = ADCE_GET_ENTROPY(buf, len);
+        if (rc != 0) {
+            fprintf(stderr,
+                    "FAIL: entropy len=%zu returned %d, expected 0 -- the"
+                    " kernel entropy syscall behind ADCE_GET_ENTROPY failed\n",
+                    len, rc);
+            return 1;
+        }
+
+        /* Property 2, per region rather than per buffer. */
+        for (off = 0; off < len; off += 256u) {
+            size_t end = (off + 256u < len) ? off + 256u : len;
+            if (end - off < 16u) {
+                continue; /* too short for the 256^-16 argument above */
+            }
+            if (!entropy_region_written(buf, off, end)) {
+                fprintf(stderr,
+                        "FAIL: entropy len=%zu left bytes [%zu,%zu) entirely"
+                        " unwritten -- the chunking loop did not cover the"
+                        " whole request\n",
+                        len, off, end);
+                return 1;
+            }
+        }
+
+        /* Property 3: nothing past the request moved. */
+        for (off = len; off < sizeof(buf); ++off) {
+            if (buf[off] != (uint8_t)ENTROPY_GUARD) {
+                fprintf(stderr,
+                        "FAIL: entropy len=%zu wrote past the request at"
+                        " offset %zu (0x%02X, expected 0x%02X) -- off-by-one"
+                        " in the chunk arithmetic\n",
+                        len, off, buf[off], (unsigned)ENTROPY_GUARD);
+                return 1;
+            }
+        }
+
+        /* Property 4: a second fill differs from the first. */
+        if (k > 0 && len == lens[k - 1]) {
+            /* unreachable with the table above; kept honest if it changes */
+            ADCE_TEST_ASSERT(memcmp(buf, prev, len) != 0);
+        }
+        rc = ADCE_GET_ENTROPY(prev, len);
+        if (rc != 0) {
+            fprintf(stderr, "FAIL: entropy len=%zu second call returned %d\n",
+                    len, rc);
+            return 1;
+        }
+        if (memcmp(buf, prev, len) == 0) {
+            fprintf(stderr,
+                    "FAIL: entropy len=%zu produced identical bytes twice --"
+                    " the source is not returning entropy\n",
+                    len);
+            return 1;
+        }
+    }
+
+    printf("  ENTROPY ADCE_GET_ENTROPY executed at %zu lengths up to %u bytes;"
+           " chunking exercised above 256\n",
+           sizeof(lens) / sizeof(lens[0]), (unsigned)lens[5]);
+    return 0;
+}
+
 static int test_time_source(void) {
     uint64_t t1 = adce_now_ns();
     uint64_t t2 = adce_now_ns();
@@ -363,6 +498,7 @@ int main(void) {
         {"q16_boundaries", test_q16_boundaries},
         {"token_bucket", test_token_bucket},
         {"rng", test_rng},
+        {"platform_entropy", test_platform_entropy},
         {"time_source", test_time_source},
         {"epoch_state_lock_free", test_epoch_state_lock_free},
         {"seqlock_single_threaded", test_seqlock_single_threaded},
