@@ -897,13 +897,18 @@ looking.
   entry below. What remains uncovered and is NOT claimed: the Linux arm's `EINTR` and
   short-read retries, which need a signal to provoke.
 
-  **(4) The seqlock retry path has never been timed.** The other half of the old (3), left
-  behind when the tap was promoted out of it. §5 of `docs/enforcement-plane.md` measures the
-  gate on both architectures per outcome, but every figure comes from a fixture with no
-  concurrent publication, so `adce_epoch_read` never retried and §2's estimate of those odds
-  remains analytic. Below (3) because the path is executed under
-  `test_harness_concurrent` — the measurements there record nonzero `torn` reads — it is
-  only its COST that is unmeasured.
+  **(4) RETIRED — MEASURED, AND THE PREDICTION WAS REFUTED.** The seqlock spin. In one
+  line: at the shipped cadence it is entered about 3e-9 times per read with four readers and
+  not once in two billion reads with one; its cost is bounded by the write window, measured
+  at 6.8-10.9 ns across 5 runs; and the term is negligible against the tap — but the
+  iteration distribution is FAT-TAILED rather than geometric, which refutes what was
+  predicted from the code. Details, and the branch-3 assertion that came out of it, are in
+  the entry below.
+
+  Two premises in this entry were wrong and are corrected rather than quietly dropped. The
+  analytic estimate it refers to DOES exist, in `docs/enforcement-plane.md` §2. And
+  `adce_epoch_read` has NO retry loop — zero `while` statements; on a torn read it returns 0
+  and the caller does not read again. The only loop in the read path is the entry spin.
 
   **(5) GCC's TSan runs nowhere**; the GCC profile above is ASan+UBSan only, deliberately,
   so every race result in this project is Clang's. Last among the runnable entries, and the
@@ -1545,6 +1550,100 @@ looking.
   **No shipping translation unit changed.** `include/` and `src/` are byte-identical to
   `main`, so the Linux arm cannot have been affected and R4's propose-and-wait never arises.
 
+- **THE SEQLOCK SPIN: MEASURED, ASSERTED, AND THE PRE-REGISTERED PREDICTION REFUTED.**
+  Entry (4), retired. Branch 3 was reachable, so this produced a CONTROL as well as numbers.
+
+  **Two premises corrected before any measurement.** The analytic estimate entry (4) cites
+  exists — `docs/enforcement-plane.md` §2, "the odds of landing inside a write on the order
+  of the write's duration divided by 10 ms". And `adce_epoch_read` has **no retry loop**: zero
+  `while` statements, and on a torn read it RETURNS 0 rather than reading again. The only loop
+  in the entire read path is the entry spin in `adce_seqlock_read_begin`. "The retry path" is
+  one thing, and it is the spin. The torn branch was excluded with that reason stated.
+
+  **THE STRUCTURAL FINDING, which is worth more than the timing.** `adce_seqlock_read_retry`
+  never checks the parity of the value the reader started from:
+
+      return s != start;
+
+  So a reader that begins inside a write AND finishes inside the same write sees an unchanged
+  sequence, concludes nothing moved, and **accepts a payload the writer had not finished
+  assembling.** Nothing downstream catches it. **The entry spin is therefore the SOLE guard
+  against consuming a mid-write state, not an optimisation over the retry predicate.**
+
+  This was found by being wrong. A no-spin probe was built as an anti-vacuity guard, expected
+  to FAIL and thereby prove the window was open. It succeeded, and the reason was the missing
+  parity check.
+
+  **BRANCH 3 REACHED: `test_seqlock_retry_constructed`**, running in all three `verify.sh`
+  profiles with no timing threshold anywhere. The writer opens the window by hand and leaves
+  the payload half assembled — `epoch_id` advanced to 2 while `pressure` still holds the
+  previous committed value, so `(0, 2)` is a pair no committed state ever carries. Four
+  equalities:
+
+  | # | assertion | what it establishes |
+  |---|---|---|
+  | 1 | the probe observed an ODD sequence | the window was open, by direct observation rather than by timing |
+  | 2 | the probe SUCCEEDED without the spin | the finding above |
+  | 3 | it accepted `(epoch=2, pressure=0)` | a state the writer never committed |
+  | 4 | the real read returned the COMPLETE post-write state | the spin waited |
+
+  Remove the spin and 4 becomes 2. The mutation is not described, it is the probe, and it runs
+  on every gate execution.
+
+  **FREQUENCY — a property of the schedule.** Development host, 10 runs per cell, ~2e9 reads
+  per cell at one reader and ~5e9 at four:
+
+  | writer cadence | 1 reader | 4 readers |
+  |---|---|---|
+  | 10 ms (shipped) | **0 in 2.04e9 reads** | 2.95e-9 per read |
+  | 100 us | **0 in 1.93e9 reads** | 8.92e-9 |
+  | 10 us | 5.25e-10 | 6.95e-8 |
+  | 1 us | 3.39e-9 | 2.09e-8 |
+
+  At the shipped cadence a single reader entered the spin **zero times in two billion reads**.
+  A run that sees none measures nothing, which is why the cadence was swept down.
+
+  **DISTRIBUTION — and this REFUTES the pre-registered prediction.** Model A was predicted:
+  independent Bernoulli entry, geometric iterations, thin tail, because the write window is
+  three relaxed stores and nothing couples a reader's next read to the writer's phase. The
+  spin-iteration histogram at four readers says otherwise:
+
+  | cadence | entries | 1 | 2 | 3 | 4-7 | 8-15 | **16+** |
+  |---|---|---|---|---|---|---|---|
+  | 10 us | 328 | 14 | 6 | 2 | 41 | 48 | **217 (66%)** |
+  | 1 us | 82 | 1 | | | 1 | 3 | **77 (94%)** |
+
+  Two thirds to nineteen twentieths of all spins run sixteen or more iterations. That is not
+  geometric and the mean would badly understate the worst case — which is exactly the
+  distinction the two models were set up to separate. **Model A is refuted and Model B's
+  shape is what the data shows.**
+
+  **The mechanism, and it is visible in the code once looked for.** The spinning readers
+  hammer the sequence line with acquire loads while the writer needs it exclusive to finish.
+  A reader that enters the spin therefore DELAYS the writer it is waiting for, and the more
+  readers spin the longer the window they are spinning on lasts. The coupling Model A assumed
+  absent is created by the spin itself. At one reader the effect is weak — 6 entries total
+  across all cadences, spread thinly — and at four it dominates.
+
+  **COST.** A spin ends when the writer finishes, so the write window bounds it.
+  `adce_epoch_publish` measured uncontended at 6.8, 6.9, 7.6, 8.1 and 10.9 ns across 5 runs,
+  n = 200,000 calls each. The first version of that measurement reported 0.000 ns because the
+  state object never escaped and the compiler deleted the loop; it is now static and read back,
+  which is recorded because a measurement that silently measures nothing is this project's
+  documented failure mode.
+
+  **DECISION-RELEVANCE — the verdict the brief asked for, against the tap.** The tap costs
+  1.74 ns per arrival at one thread and 134 ns at eight on this host. The spin contributes
+  frequency times cost: at the shipped cadence with four readers that is about 3e-9 entries
+  per read, and even a 16-plus-iteration spin is tens to hundreds of nanoseconds. The expected
+  per-arrival contribution is therefore on the order of 1e-6 ns — **six to eight orders of
+  magnitude below the contention term the tap measurement already found.**
+
+  **It changes no decision the tap has not already decided, and that is a complete result
+  rather than a weak one.** The fat tail does not rescue it: a tail event costing a few
+  hundred nanoseconds, once per roughly three hundred million reads, is not a term any
+  deployment sizes against. Entry (4) is retired on that basis and not on a null.
+
 - **THE STOPPING RULE, in force from 2026-09-11.** The next three MERGED pull requests move
   the library's evidence boundary. No exceptions, including "small" documentation corrections
   and including defects found in the apparatus, which are FILED in the list rather than
@@ -1557,9 +1656,20 @@ looking.
   **If a fourth apparatus pull request merges before three evidence ones do, record that the
   stopping rule failed and treat the failure as the finding.**
 
-  Count: this pull request is the SECOND. One remains, and the list's own ranking names it —
-  the seqlock retry path's cost, entry (4), executed under `test_harness_concurrent` with
-  only its COST unmeasured. Entry (1) was retired by #33 and entry (3) by this pull request.
+  Count: this pull request is the THIRD AND LAST. The window is closed. Entry (1) was retired
+  by #33, entry (3) by #34 and entry (4) by this one; #35 was the admitted exception, a
+  defect that made a required check report a false red, and it did not consume a slot.
+
+  **What the window cost and what it bought, so the next one can be sized.** Three evidence
+  pull requests retired three list entries and produced two controls and one measurement.
+  Every one of the three found its entry's own premise to be WRONG — the tap's entry
+  understated a global ceiling, entry (3) claimed a path was unexecuted when only its chunking
+  was, and entry (4) said an analytic estimate was missing when it exists and called a
+  non-existent retry loop "the retry path". That is three for three, and it is the strongest
+  argument in this document for re-deriving from source rather than reading the list.
+
+  **Apparatus work is now unblocked**, and the filed items below are the queue. The
+  pre-commit-on-main hook is first, for the reason recorded with it.
 
   **The rule has no gate behind it and is self-policed**, which is exactly the class this
   document condemns elsewhere. Nothing goes red on a fourth apparatus merge. That is stated
@@ -1570,7 +1680,9 @@ looking.
   they accumulate and land with the next evidence pull request.
 
 - **FILED, NOT FIXED, under the stopping rule.** Apparatus defects found and deliberately
-  left alone. Items 3 and 4 were added by the entropy pull request, and item 4 BLOCKS it.
+  left alone. Items 3 and 4 came from the entropy pull request; item 4 was RESOLVED by #35,
+  which is the stopping rule's admitted exception, and is kept with its resolution rather
+  than deleted. Item 5 came from this one.
 
   1. **Entry (2) of the unverified list is stale, and has been since #16.** It still reads
      "Runnable, untested, and the next task" for the aggregate ceiling under real concurrency.
@@ -1644,6 +1756,30 @@ looking.
      filing: keep the two streams in separate files and run the guard against stdout alone;
      or relax `-qxF` to a line-anchored match tolerant of a leading fragment; or have the
      runner emit its manifest to a third descriptor that nothing else writes.
+
+     **RESOLVED by #35**, the stopping rule's admitted exception, taking the first option:
+     the three `2>&1` merges in `verify-linux-gcc.sh` are gone, `-qxF` is untouched, and both
+     gates carry the invariant. Kept here with its resolution rather than deleted, because the
+     filing is the record of what blocked an evidence pull request and why the exception was
+     granted.
+
+  5. **The #35 NOTE asserts a splice where its predicate only establishes a count
+     disagreement.** Filed against text this project wrote three days ago, which is the point.
+
+     The diagnostic added to both gates compares `TEST OK:` occurrences against well-formed
+     whole lines and, when they differ, prints `output was SPLICED`. What the predicate
+     actually establishes is narrower: **the two counts disagree.** Splicing is one cause. A
+     legitimate line that happens to contain the token elsewhere is another, and M3 in that
+     pull request fires the NOTE for exactly that reason — a substring inside other text, no
+     splice anywhere. The NOTE was demonstrated firing on a case it misdescribes, and the
+     demonstration was recorded as success.
+
+     It is the printed-universal error in a new place: a predicate's OUTPUT is stated more
+     strongly than the predicate supports. The verdict is unaffected — the NOTE never changes
+     red to green — so this is a wording defect, not a control defect. The honest form names
+     the observation and lists splicing as the leading explanation rather than the finding.
+
+     NOT FIXED: this is an evidence pull request and the wording is apparatus.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
