@@ -198,6 +198,24 @@ assert_all_tests_ran() {
             bad=1
         fi
     done
+    # ATTRIBUTION, emitted only when the guard has already failed, and it never
+    # changes the verdict. A contaminated log and an absent case both look like
+    # "it never ran"; these two counts separate them. Every legitimate line is
+    # exactly `TEST OK: <name>`, so a bare occurrence that is not a whole line
+    # means something was spliced into the stream -- which is what `2>&1` used to
+    # do here. A corrupted log stays RED: the repair is to stop corrupting it,
+    # not to start accepting it.
+    if [ "$bad" -ne 0 ]; then
+        local total well
+        total=$(grep -c 'TEST OK: ' "$log" 2>/dev/null || true)
+        well=$(grep -cE '^TEST OK: [A-Za-z0-9_]+$' "$log" 2>/dev/null || true)
+        if [ "${total:-0}" -ne "${well:-0}" ]; then
+            echo "NOTE[$profile]: the log has $total 'TEST OK:' occurrences but" \
+                 "only $well well-formed lines -- output was SPLICED, so the" \
+                 "names above may have run and been corrupted rather than" \
+                 "skipped. Check that stderr is not merged into this log." >&2
+        fi
+    fi
     return "$bad"
 }
 
@@ -226,10 +244,27 @@ for platform in linux/arm64 linux/amd64; do
     log="$OUT/log-$(printf '%s' "$platform" | tr / -)"
     # The run is teed rather than left on the terminal so the ran-tests guard has
     # the output to check; 'pipefail' keeps the container's exit status decisive.
+    #
+    # STDERR IS NOT MERGED INTO THE LOG, and that is load-bearing rather than
+    # tidiness. The guard below matches whole lines with `grep -qxF`. stdout in
+    # the test binaries is block-buffered through this pipe and stderr is
+    # unbuffered, so with `2>&1` an unbuffered stderr write lands between two
+    # stdout chunks and SPLITS whatever line straddles the boundary -- after
+    # which `-x` cannot tell a split line from an absent one and a passing suite
+    # is reported as an unrun test. That is a FALSE RED, and it happened:
+    # shipping-target on #34, linux/amd64, where the binary printed "All tests
+    # passed" and the log carried the orphan fragment `_draw_invariance`.
+    #
+    # stderr still reaches the terminal and the CI job log; it is simply not in
+    # the file the guard reads. Nothing else reads these logs -- the guard is
+    # their only consumer -- so removing the merge costs nothing.
+    #
+    # DO NOT REINTRODUCE `2>&1` HERE. scripts/verify.sh already builds its log
+    # this way and the two must not diverge.
     if docker run --rm --platform "$platform" -v "$PWD":/src:ro -w /src "$IMAGE" \
          sh -c "gcc --version | head -1 && uname -m && \
                 gcc $STRICT_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc $LDLIBS && \
-                /tmp/t_gcc" 2>&1 | tee "$log" \
+                /tmp/t_gcc" | tee "$log" \
        && assert_all_tests_ran "$log" "$platform"; then
         echo "== $platform: PASS =="
     else
@@ -246,7 +281,7 @@ for platform in linux/arm64 linux/amd64; do
             if docker run --rm --platform "$platform" -v "$PWD":/src:ro -w /src "$IMAGE" \
                  sh -c "gcc $SAN_FLAGS -Iinclude $SRC_LIST -o /tmp/t_gcc_san $LDLIBS && \
                         ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
-                        /tmp/t_gcc_san" 2>&1 | tee "$sanlog" \
+                        /tmp/t_gcc_san" | tee "$sanlog" \
                && assert_all_tests_ran "$sanlog" "$platform gcc-san"; then
                 echo "== $platform gcc asan+ubsan: PASS =="
             else
@@ -307,7 +342,7 @@ for platform in linux/arm64 linux/amd64; do
                           echo \"-- pinned run \$i/$ADCE_PIN_REPEAT --\"; \
                           /tmp/t_pin || exit 1; \
                           i=\$((i + 1)); \
-                        done" 2>&1 | tee "$pinlog" \
+                        done" | tee "$pinlog" \
                && assert_all_tests_ran "$pinlog" "$platform pinned"; then
                 echo "== $platform strict pinned: PASS =="
             else
