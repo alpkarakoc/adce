@@ -127,6 +127,24 @@ assert_all_tests_ran() {
             bad=1
         fi
     done
+    # ATTRIBUTION, emitted only when the guard has already failed, and it never
+    # changes the verdict. A contaminated log and an absent case both look like
+    # "it never ran"; these two counts separate them. Every legitimate line is
+    # exactly `TEST OK: <name>`, so a bare occurrence that is not a whole line
+    # means something was spliced into the stream -- which is what `2>&1` used to
+    # do here. A corrupted log stays RED: the repair is to stop corrupting it,
+    # not to start accepting it.
+    if [ "$bad" -ne 0 ]; then
+        local total well
+        total=$(grep -c 'TEST OK: ' "$log" 2>/dev/null || true)
+        well=$(grep -cE '^TEST OK: [A-Za-z0-9_]+$' "$log" 2>/dev/null || true)
+        if [ "${total:-0}" -ne "${well:-0}" ]; then
+            echo "NOTE[$profile]: the log has $total 'TEST OK:' occurrences but" \
+                 "only $well well-formed lines -- output was SPLICED, so the" \
+                 "names above may have run and been corrupted rather than" \
+                 "skipped. Check that stderr is not merged into this log." >&2
+        fi
+    fi
     return "$bad"
 }
 
@@ -145,6 +163,14 @@ run_profile() {
         if [ "$ADCE_REPEAT" -gt 1 ]; then
             echo "-- $profile: run $i/$ADCE_REPEAT --"
         fi
+        # STDERR IS DELIBERATELY NOT MERGED. The guard below matches whole
+        # lines; stdout here is block-buffered through this pipe and stderr is
+        # unbuffered, so `2>&1` would let a stderr write land between two
+        # stdout chunks and SPLIT a "TEST OK:" line, after which `-x` cannot
+        # tell a split line from an absent one. That is a false red and it
+        # happened on the other gate, which carried the merge until it was
+        # removed. stderr still reaches the terminal; it is simply not in the
+        # file the guard reads. Do not add `2>&1` here.
         "$bin" | tee -a "$log"
         i=$((i + 1))
     done
