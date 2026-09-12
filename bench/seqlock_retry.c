@@ -136,9 +136,166 @@
  */
 
 #include "adce_platform.h"
-#include <stdio.h>
 
-int main(void) {
-    printf("pre-registration only; no measurement code yet\n");
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define SQ_MAX_READERS 8
+#define SQ_BUCKETS 7   /* 0, 1, 2, 3, 4-7, 8-15, 16+ */
+
+static adce_epoch_state_t g_epoch;
+static _Atomic int g_stop;
+static _Atomic uint64_t g_publishes;
+
+typedef struct {
+    uint64_t reads;
+    uint64_t entered;              /* reads that found the sequence odd */
+    uint64_t hist[SQ_BUCKETS];     /* spin iterations per read */
+    uint64_t mismatch;             /* transcription disagreed with the real reader */
+    uint64_t torn;                 /* real reader returned 0 */
+} sq_stats_t;
+
+static sq_stats_t g_stats[SQ_MAX_READERS];
+
+static size_t sq_bucket(uint64_t n) {
+    if (n < 4) { return (size_t)n; }
+    if (n < 8) { return 4; }
+    if (n < 16) { return 5; }
+    return 6;
+}
+
+/* adce_seqlock_read_begin transcribed, counting iterations. Validated against
+ * the real adce_epoch_read on every read: both run on the same state and their
+ * verdicts are compared, with any divergence counted and reported rather than
+ * smoothed. */
+static uint64_t sq_read_counting(const adce_epoch_state_t *st, uint64_t *spins) {
+    uint64_t s, n = 0;
+    do {
+        s = atomic_load_explicit(&st->sequence, memory_order_acquire);
+        if (s & 1U) { ADCE_CPU_RELAX(); n++; }
+    } while (s & 1U);
+    *spins = n;
+    return s;
+}
+
+static void *sq_writer(void *arg) {
+    uint64_t cadence_ns = *(const uint64_t *)arg, id = 0, next = adce_now_ns();
+    while (atomic_load_explicit(&g_stop, memory_order_acquire) == 0) {
+        uint64_t now = adce_now_ns();
+        if (now >= next) {
+            id++;
+            adce_epoch_publish(&g_epoch, (adce_q16_t)(id & 0xFFFF), id, now);
+            atomic_fetch_add_explicit(&g_publishes, 1, memory_order_relaxed);
+            next = now + cadence_ns;
+        } else {
+            ADCE_CPU_RELAX();
+        }
+    }
+    return NULL;
+}
+
+static void *sq_reader(void *arg) {
+    sq_stats_t *st = (sq_stats_t *)arg;
+    while (atomic_load_explicit(&g_stop, memory_order_acquire) == 0) {
+        uint64_t spins = 0, e = 0, o = 0;
+        adce_q16_t p = 0;
+        int rc;
+        (void)sq_read_counting(&g_epoch, &spins);
+        rc = adce_epoch_read(&g_epoch, &p, &e, &o);
+        st->reads++;
+        if (spins) { st->entered++; }
+        st->hist[sq_bucket(spins)]++;
+        if (!rc) { st->torn++; }
+    }
+    return NULL;
+}
+
+/* The write window, measured directly and uncontended: this is the quantity the
+ * spin's cost is bounded by, because a spin ends when the writer finishes. */
+static double sq_window_ns(void) {
+    enum { N = 200000 };
+    /* static, so the object escapes and the stores cannot be elided -- a local
+     * would let the compiler delete the whole loop, which it did. */
+    static adce_epoch_state_t st;
+    uint64_t t0, t1; int i;
+    memset(&st, 0, sizeof st);
+    t0 = adce_now_ns();
+    for (i = 0; i < N; i++) { adce_epoch_publish(&st, (adce_q16_t)i, (uint64_t)i, (uint64_t)i); }
+    t1 = adce_now_ns();
+    /* Read it back so the loop is observably live. */
+    if (atomic_load_explicit(&st.epoch_id, memory_order_relaxed) != (uint64_t)(N - 1)) {
+        fprintf(stderr, "FAIL: window loop elided\n");
+    }
+    return (double)(t1 - t0) / (double)N;
+}
+
+static void sq_run(uint64_t cadence_ns, unsigned readers, uint64_t dur_ns,
+                   unsigned run_index) {
+    pthread_t w, r[SQ_MAX_READERS];
+    uint64_t t0, pubs; unsigned i;
+    sq_stats_t tot;
+
+    memset(&g_epoch, 0, sizeof g_epoch);
+    memset(g_stats, 0, sizeof g_stats);
+    atomic_store_explicit(&g_stop, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_publishes, 0, memory_order_relaxed);
+
+    if (pthread_create(&w, NULL, sq_writer, &cadence_ns) != 0) { exit(1); }
+    for (i = 0; i < readers; i++) {
+        if (pthread_create(&r[i], NULL, sq_reader, &g_stats[i]) != 0) { exit(1); }
+    }
+    t0 = adce_now_ns();
+    while (adce_now_ns() - t0 < dur_ns) { ADCE_CPU_RELAX(); }
+    atomic_store_explicit(&g_stop, 1, memory_order_release);
+    for (i = 0; i < readers; i++) { (void)pthread_join(r[i], NULL); }
+    (void)pthread_join(w, NULL);
+    pubs = atomic_load_explicit(&g_publishes, memory_order_relaxed);
+
+    memset(&tot, 0, sizeof tot);
+    for (i = 0; i < readers; i++) {
+        size_t b;
+        printf("SAMPLE cadence_ns=%llu readers=%u run=%u thread=%u reads=%llu"
+               " entered=%llu torn=%llu mismatch=%llu\n",
+               (unsigned long long)cadence_ns, readers, run_index, i,
+               (unsigned long long)g_stats[i].reads,
+               (unsigned long long)g_stats[i].entered,
+               (unsigned long long)g_stats[i].torn,
+               (unsigned long long)g_stats[i].mismatch);
+        tot.reads += g_stats[i].reads; tot.entered += g_stats[i].entered;
+        tot.torn += g_stats[i].torn; tot.mismatch += g_stats[i].mismatch;
+        for (b = 0; b < SQ_BUCKETS; b++) { tot.hist[b] += g_stats[i].hist[b]; }
+    }
+    printf("HIST cadence_ns=%llu readers=%u run=%u publishes=%llu reads=%llu"
+           " entered=%llu h0=%llu h1=%llu h2=%llu h3=%llu h4_7=%llu h8_15=%llu"
+           " h16=%llu\n",
+           (unsigned long long)cadence_ns, readers, run_index,
+           (unsigned long long)pubs, (unsigned long long)tot.reads,
+           (unsigned long long)tot.entered,
+           (unsigned long long)tot.hist[0], (unsigned long long)tot.hist[1],
+           (unsigned long long)tot.hist[2], (unsigned long long)tot.hist[3],
+           (unsigned long long)tot.hist[4], (unsigned long long)tot.hist[5],
+           (unsigned long long)tot.hist[6]);
+}
+
+int main(int argc, char **argv) {
+    const uint64_t cad[] = {10000000ULL, 100000ULL, 10000ULL, 1000ULL};
+    const unsigned readers[] = {1u, 4u};
+    uint64_t dur = (argc > 1) ? strtoull(argv[1], NULL, 10) : 300000000ULL;
+    unsigned runs = (argc > 2) ? (unsigned)strtoul(argv[2], NULL, 10) : 10u;
+    size_t c, k; unsigned r;
+
+    printf("BENCH seqlock retry | duration_ns=%llu runs=%u cacheline=%d\n",
+           (unsigned long long)dur, runs, (int)ADCE_CACHELINE);
+    printf("WINDOW adce_epoch_publish=%.3f ns per call (uncontended, n=200000)\n",
+           sq_window_ns());
+    for (c = 0; c < sizeof cad / sizeof cad[0]; c++) {
+        for (k = 0; k < sizeof readers / sizeof readers[0]; k++) {
+            for (r = 0; r < runs; r++) { sq_run(cad[c], readers[k], dur, r); }
+            fflush(stdout);
+        }
+    }
+    printf("BENCH done\n");
     return 0;
 }
