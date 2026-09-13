@@ -1563,8 +1563,12 @@ looking.
   in the entire read path is the entry spin in `adce_seqlock_read_begin`. "The retry path" is
   one thing, and it is the spin. The torn branch was excluded with that reason stated.
 
-  **THE STRUCTURAL FINDING, which is worth more than the timing.** `adce_seqlock_read_retry`
-  never checks the parity of the value the reader started from:
+  **THE STRUCTURAL FINDING, which is worth more than the timing.** SUPERSEDED as of the
+  hardening recorded further below — the predicate now rejects an odd start, so the spin is one
+  of two guards rather than the sole one. Kept as written because it is what the measurement
+  found, and because the hardening is only intelligible against it.
+  At the time, `adce_seqlock_read_retry`
+  never checked the parity of the value the reader started from:
 
       return s != start;
 
@@ -1815,6 +1819,88 @@ looking.
      the observation and lists splicing as the leading explanation rather than the finding.
 
      NOT FIXED: this is an evidence pull request and the wording is apparatus.
+
+- **`adce_seqlock_read_retry` NOW REJECTS AN ODD START, and the defect class is the INVERSE
+  of the `adce_epoch_is_stale` one.** Approved as option 1 of four and implemented; the three
+  rejected options are recorded with their reasons so the ruling is explicit rather than
+  inherited.
+
+      -    return s != start;
+      +    return (start & 1U) || s != start;
+
+  **THE CLASS, and it is the mirror image of the one recorded above.** With
+  `adce_epoch_is_stale` the PROSE was right about the function and wrong about the system:
+  every word described the function correctly while the gate had stopped going through it.
+  Here the inverse. **The CODE was right and the primitive's precondition was unwritten at
+  the point that depended on it.** `adce_seqlock_read_begin` spins while the sequence is odd
+  and therefore cannot return one, so the composed pair was safe — but the safety property
+  lived entirely in one function's spin loop, and `adce_seqlock_read_retry` neither stated nor
+  checked the condition its correctness rested on. A partial function with an unwritten
+  domain, called correctly by luck of who calls it.
+
+  The two together are worth more than either: one says a true sentence can describe the
+  wrong route, the other says correct code can rest on an unstated precondition. Neither is
+  reachable by reading the function alone, which is what makes them a pair.
+
+  **THE OPTIONS, AND WHY THE OTHER THREE WERE REJECTED.**
+
+  | | option | rejected because |
+  |---|---|---|
+  | 1 | `(start & 1U) \|\| s != start` | **TAKEN** |
+  | 2 | assertion active only under sanitizers | protects the build nobody ships; a check absent from the shipped configuration is the silently-skipping class this document ranks worst |
+  | 3 | documented contract, no enforcement | **this was the state already, minus the documentation.** Choosing it means writing the invariant down and calling that a fix |
+  | 4 | opaque `start` type only `read_begin` can produce | DEFERRED, not closed — see below |
+
+  Option 1 was taken because the failure mode is accepting a half-assembled payload, a
+  fail-OPEN on a fail-closed plane, against a cost the instrument could not resolve. The
+  asymmetry decides it, not the arithmetic.
+
+  **OPTION 4 IS DEFERRED AND NOT CLOSED, and this sentence exists so a future reader knows it
+  was weighed rather than missed.** Making `start` an opaque type that only
+  `adce_seqlock_read_begin` can produce would make the invariant structural instead of
+  checked — strictly stronger. It was deferred because it changes BOTH signatures for a defect
+  with no risky caller today, and because it would still not stop a future fast path
+  constructing one deliberately. **What reopens it:** a second caller obtaining `start` by any
+  route other than `read_begin`, or a non-spinning fast path added to the read side. Either
+  makes the type the right answer and the branch a patch over it.
+
+  **COMPILER SCOPE.** The instruction-count figures from the proposal are WITHDRAWN rather
+  than restated. They were clang output on arm64, there is no local x86_64 or GCC to check
+  them against, and one compiler's codegen must not read as a property of the shipped binary —
+  the gate is GCC 14 on two architectures. Only the timing claim survives, with its scope on
+  its face: clang on arm64 Darwin, uncontended, 20,000,000 calls per run over 7 runs, both
+  forms converging to ~0.69 ns and differing by ~0.003 ns against a within-binary warm-up
+  spread from 1.66 to 0.69. **No measurement of any kind was taken under GCC or on x86_64.**
+
+  **MEASUREMENT REGIME, and why uncontended is the conservative side rather than the
+  convenient one.** Under contention the added test is still perfectly predicted, because
+  `adce_seqlock_read_begin` cannot return an odd value and the branch is not-taken on every
+  reachable path. And the arrival path is dominated by the tap's measured 1.74–134 ns
+  contention term, six to eight orders of magnitude above the term being added. That is the
+  same decision-relevance test that retired entry (4), applied to a change rather than to a
+  measurement.
+
+  **THE PROOF IS STRUCTURAL AND THE SWEEP CONFIRMS IT**, in that order, because a sweep over a
+  constructed range is a sampled claim wearing an exhaustive label. When `start & 1U` is 0 the
+  hardened form short-circuits to `s != start` by the definition of `||`, for every `s` — so
+  the two forms are identical on every even start over the whole of `uint64_t`. The sweep then
+  confirms it over 7,340,041 comparisons with zero mismatches, stated as **identical over
+  [0, 2^21)** and never as "no existing case changes".
+
+  **THE TEST THAT DOCUMENTED THE DEFECT NOW ASSERTS THE FIX.**
+  `test_seqlock_retry_constructed` carried the only other caller —
+  `sq_read_nospin`, which deliberately obtains `start` without the spin — and asserted that
+  probe SUCCEEDS. Hardening inverts it. The case now asserts the probe FAILS and that both
+  out-parameters keep sentinels no committed state carries, so "nothing written through" is
+  proved rather than inferred from a zero. **That assertion is the in-gate mutation proof:
+  revert the predicate and it goes red on every profile, every run, every host** — which is
+  branch 1 rather than a claim in a commit message.
+
+  One recorded finding is superseded by this and is corrected rather than left standing: the
+  entry spin is **no longer the SOLE guard** against consuming a mid-write state. It is one of
+  two, and the two are not redundant — the retry predicate makes a no-spin reader FAIL, while
+  the spin makes the composed reader WAIT and then succeed. Assertion 4 of that case is what
+  keeps the second half honest.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
