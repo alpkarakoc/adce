@@ -85,7 +85,7 @@ static uint64_t obs_service_deadline(adce_obs_thread_t *t, uint64_t now_ns,
 
     if (overrun >= ADCE_OBS_EPOCH_NS) {
         t->skipped_epochs += overrun / ADCE_OBS_EPOCH_NS;
-        t->discarded_arrivals += adce_obs_counter_take(t->ctx.counter);
+        t->discarded_arrivals += adce_obs_drain(&t->ctx);
         /* Re-anchored to now rather than advanced by T: the old phase is gone
          * and stepping toward it one epoch per pass would spin through the
          * whole backlog without sleeping. */
@@ -142,12 +142,11 @@ static void *obs_thread_main(void *arg) {
     return NULL;
 }
 
-int adce_obs_thread_start(adce_obs_thread_t *t, adce_obs_counter_t *counter,
-                          adce_epoch_state_t *epoch) {
+int adce_obs_thread_start(adce_obs_thread_t *t, adce_epoch_state_t *epoch) {
     int ready;
 
     memset(t, 0, sizeof(*t));
-    adce_obs_init(&t->ctx, counter, epoch);
+    adce_obs_init(&t->ctx, epoch);
 
     atomic_store_explicit(&t->running, 1, memory_order_relaxed);
     atomic_store_explicit(&t->ready, 0, memory_order_release);

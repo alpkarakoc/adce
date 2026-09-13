@@ -70,8 +70,7 @@ typedef struct {
  * could not be created or the claim was refused -- a refused claim means
  * another writer already owns this context, which must fail loudly at startup
  * rather than as a silently non-publishing thread. */
-int adce_obs_thread_start(adce_obs_thread_t *t, adce_obs_counter_t *counter,
-                          adce_epoch_state_t *epoch);
+int adce_obs_thread_start(adce_obs_thread_t *t, adce_epoch_state_t *epoch);
 
 /* Requests the stop and joins. Safe against a publication in flight; see the
  * implementation for why, and for why pthread_cancel is not used. Idempotent. */

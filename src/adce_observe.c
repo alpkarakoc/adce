@@ -29,15 +29,66 @@ static adce_q16_t obs_unit_to_q16(double unit) {
     return (adce_q16_t)(unit * (double)ADCE_PRESSURE_MAX);
 }
 
-void adce_obs_init(adce_obs_ctx_t *ctx, adce_obs_counter_t *counter,
-                   adce_epoch_state_t *epoch) {
+void adce_obs_init(adce_obs_ctx_t *ctx, adce_epoch_state_t *epoch) {
+    unsigned i;
+
     memset(ctx, 0, sizeof(*ctx));
-    ctx->counter = counter;
     ctx->epoch = epoch;
 
-    atomic_store_explicit(&counter->arrivals, (uint64_t)0,
-                          memory_order_relaxed);
+    /* memset already zeroed the slots, but they are _Atomic and a plain memset
+     * is not an atomic store, so the initialisation is repeated through the
+     * atomic API. No ingress thread can be running yet -- none has claimed --
+     * so relaxed is sufficient and there is nothing to order against. */
+    for (i = 0; i < (unsigned)ADCE_OBS_MAX_INGRESS; ++i) {
+        atomic_store_explicit(&ctx->slots[i].arrivals, (uint64_t)0,
+                              memory_order_relaxed);
+    }
+    atomic_store_explicit(&ctx->claimed, 0u, memory_order_relaxed);
     atomic_store_explicit(&ctx->writer_claimed, 0, memory_order_release);
+}
+
+adce_obs_counter_t *adce_obs_claim_counter(adce_obs_ctx_t *ctx) {
+    unsigned cur = atomic_load_explicit(&ctx->claimed, memory_order_acquire);
+
+    /* A CAS loop rather than a bare fetch_add, so `claimed` is EXACTLY the
+     * number of slots handed out and never overshoots on a refused claim. The
+     * drain iterates it, so an inflated value would cost real exchanges per
+     * epoch; and a fetch_add that kept climbing past capacity could in
+     * principle wrap. This runs once per ingress thread at start, never on the
+     * arrival path, so a retry loop here is free. */
+    for (;;) {
+        if (cur >= (unsigned)ADCE_OBS_MAX_INGRESS) {
+            return NULL;
+        }
+        if (atomic_compare_exchange_weak_explicit(&ctx->claimed, &cur, cur + 1u,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return &ctx->slots[cur];
+        }
+    }
+}
+
+uint64_t adce_obs_drain(adce_obs_ctx_t *ctx) {
+    unsigned n = atomic_load_explicit(&ctx->claimed, memory_order_acquire);
+    uint64_t total = 0;
+    unsigned i;
+
+    for (i = 0; i < n; ++i) {
+        total += adce_obs_counter_take(&ctx->slots[i]);
+    }
+    return total;
+}
+
+uint64_t adce_obs_residual(const adce_obs_ctx_t *ctx) {
+    unsigned n = atomic_load_explicit(&ctx->claimed, memory_order_acquire);
+    uint64_t total = 0;
+    unsigned i;
+
+    for (i = 0; i < n; ++i) {
+        total += atomic_load_explicit(&ctx->slots[i].arrivals,
+                                      memory_order_relaxed);
+    }
+    return total;
 }
 
 int adce_obs_claim_writer(adce_obs_ctx_t *ctx) {
@@ -101,7 +152,7 @@ int adce_obs_epoch_close(adce_obs_ctx_t *ctx, uint64_t observed_at_ns) {
         return -1;
     }
 
-    arrivals = adce_obs_counter_take(ctx->counter);
+    arrivals = adce_obs_drain(ctx);
 
     /* Recorded before the warmup check below: warmup still drains the
      * counter, so those arrivals are closed even though nothing publishes.
