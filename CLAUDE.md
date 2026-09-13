@@ -897,13 +897,15 @@ looking.
   entry below. What remains uncovered and is NOT claimed: the Linux arm's `EINTR` and
   short-read retries, which need a signal to provoke.
 
-  **(4) RETIRED — MEASURED, AND THE PREDICTION WAS REFUTED.** The seqlock spin. In one
-  line: at the shipped cadence it is entered about 3e-9 times per read with four readers and
-  not once in two billion reads with one; its cost is bounded by the write window, measured
-  at 6.8-10.9 ns across 5 runs; and the term is negligible against the tap — but the
-  iteration distribution is FAT-TAILED rather than geometric, which refutes what was
-  predicted from the code. Details, and the branch-3 assertion that came out of it, are in
-  the entry below.
+  **(4) RETIRED — MEASURED, AND THE PREDICTION REFUTED ON ONE HOST OF THREE.** The seqlock
+  spin. In one line: at the shipped cadence it is entered about 3e-9 times per read with four
+  readers on the development host, 7.65e-9 on x86_64 CI and NOT ONCE in 2.0e8 reads on arm64
+  CI; its cost is bounded by the write window, 1.4 to 10.9 ns depending on host; and the term
+  is negligible against the tap on every host measured. The iteration distribution is
+  FAT-TAILED on the development host, which refutes what was predicted — but neither CI host
+  reproduces that tail, and arm64 CI produced one entry in a billion reads, so the refutation
+  does not generalise. Details, the host-by-host tables, and the branch-3 assertion that came
+  out of it are in the entry below.
 
   Two premises in this entry were wrong and are corrected rather than quietly dropped. The
   analytic estimate it refers to DOES exist, in `docs/enforcement-plane.md` §2. And
@@ -1550,8 +1552,9 @@ looking.
   **No shipping translation unit changed.** `include/` and `src/` are byte-identical to
   `main`, so the Linux arm cannot have been affected and R4's propose-and-wait never arises.
 
-- **THE SEQLOCK SPIN: MEASURED, ASSERTED, AND THE PRE-REGISTERED PREDICTION REFUTED.**
-  Entry (4), retired. Branch 3 was reachable, so this produced a CONTROL as well as numbers.
+- **THE SEQLOCK SPIN: MEASURED, ASSERTED, AND THE PRE-REGISTERED PREDICTION REFUTED ON ONE
+  HOST OF THREE.** Entry (4), retired. Branch 3 was reachable, so this produced a CONTROL as
+  well as numbers — and the control is host-independent where the numbers are not.
 
   **Two premises corrected before any measurement.** The analytic estimate entry (4) cites
   exists — `docs/enforcement-plane.md` §2, "the odds of landing inside a write on the order
@@ -1603,34 +1606,66 @@ looking.
   At the shipped cadence a single reader entered the spin **zero times in two billion reads**.
   A run that sees none measures nothing, which is why the cadence was swept down.
 
-  **DISTRIBUTION — and this REFUTES the pre-registered prediction.** Model A was predicted:
-  independent Bernoulli entry, geometric iterations, thin tail, because the write window is
-  three relaxed stores and nothing couples a reader's next read to the writer's phase. The
-  spin-iteration histogram at four readers says otherwise:
+  **Both CI hosts are RARER still**, which strengthens the negligibility conclusion rather
+  than weakening it. At the shipped cadence with four readers: 7.65e-9 per read on x86_64 CI
+  (2 entries in 2.6e8 reads) and **0 in 2.0e8 reads** on arm64 CI. Across the entire sweep
+  arm64 CI recorded one entry in 1.0e9 reads.
 
-  | cadence | entries | 1 | 2 | 3 | 4-7 | 8-15 | **16+** |
+  **DISTRIBUTION — Model A is refuted ON THE DEVELOPMENT HOST and NOT CORROBORATED ANYWHERE
+  ELSE.** The qualification is not hedging; it is the whole result, and stating the dev-host
+  half alone would be this project's own recurring error.
+
+  Model A was predicted: independent Bernoulli entry, geometric iterations, thin tail. The
+  development host's spin-iteration histogram at four readers refutes it outright:
+
+  | M3, 4 readers | entries | 1 | 2 | 3 | 4-7 | 8-15 | **16+** |
   |---|---|---|---|---|---|---|---|
-  | 10 us | 328 | 14 | 6 | 2 | 41 | 48 | **217 (66%)** |
-  | 1 us | 82 | 1 | | | 1 | 3 | **77 (94%)** |
+  | cadence 10 us | 328 | 14 | 6 | 2 | 41 | 48 | **217 (66%)** |
+  | cadence 1 us | 82 | 1 | | | 1 | 3 | **77 (94%)** |
 
-  Two thirds to nineteen twentieths of all spins run sixteen or more iterations. That is not
-  geometric and the mean would badly understate the worst case — which is exactly the
-  distinction the two models were set up to separate. **Model A is refuted and Model B's
-  shape is what the data shows.**
+  **Neither CI host reproduces that tail, and one of them is the authoritative platform.**
+  Same binary, same sweep, 3 runs of 100 ms per cell against the dev host's 10 of 300 ms:
 
-  **The mechanism, and it is visible in the code once looked for.** The spinning readers
-  hammer the sequence line with acquire loads while the writer needs it exclusive to finish.
-  A reader that enters the spin therefore DELAYS the writer it is waiting for, and the more
-  readers spin the longer the window they are spinning on lasts. The coupling Model A assumed
-  absent is created by the spin itself. At one reader the effect is weak — 6 entries total
-  across all cadences, spread thinly — and at four it dominates.
+  | host | total entries, whole sweep | reads | largest bucket seen |
+  |---|---|---|---|
+  | M3 Darwin arm64, 8 core | 417 | 2.4e10 | **16+**, 294 of them |
+  | `ubuntu-24.04` x86_64, 4 vCPU | 70 | 1.5e9 | **4-7**, four of them |
+  | `ubuntu-24.04-arm` aarch64, 4 vCPU | **1** | 1.0e9 | one entry, in 16+ |
+
+  On x86_64 CI the tail is THIN — 1, 2 and 3 iterations dominate and nothing reaches 8. On
+  arm64 CI the sweep produced ONE entry in a billion reads, which is not a distribution at
+  all. **So the refutation of Model A rests on one host, and the arm64 evidence this project
+  ranks highest neither supports nor contradicts it, for want of events.**
+
+  **The mechanism is a HYPOTHESIS and is not tested.** The reading that fits the dev-host
+  data is that spinning readers hammer the sequence line with acquire loads while the writer
+  needs it exclusive, so a reader that enters the spin DELAYS the writer it waits for. That
+  would be a coupling Model A assumed absent, created by the spin itself. But a second
+  reading fits equally well and this document already supplies it: the M3 is 4 performance
+  plus 4 efficiency cores, macOS migrates threads between clusters by QoS, this project sets
+  no QoS, and **the effective concurrency of the local gate is recorded here as NOT KNOWN.**
+  A reader parked on an efficiency core while the writer runs on a performance one would
+  produce long spins for a reason that has nothing to do with coherence. Nothing measured
+  here separates the two, and the CI hosts — uniform cores, hard `nproc` bound — are exactly
+  where the cluster explanation predicts the tail should vanish, which is what happened.
+
+  Recorded as unresolved rather than resolved. Separating them needs either an affinity API
+  the development machine does not expose, or a CI host with enough events to characterise a
+  distribution, and neither is available.
 
   **COST.** A spin ends when the writer finishes, so the write window bounds it.
-  `adce_epoch_publish` measured uncontended at 6.8, 6.9, 7.6, 8.1 and 10.9 ns across 5 runs,
-  n = 200,000 calls each. The first version of that measurement reported 0.000 ns because the
-  state object never escaped and the compiler deleted the loop; it is now static and read back,
-  which is recorded because a measurement that silently measures nothing is this project's
-  documented failure mode.
+  `adce_epoch_publish`, uncontended, n = 200,000 calls per measurement:
+
+  | host | ns per call |
+  |---|---|
+  | M3 Darwin arm64 | 6.8, 6.9, 7.6, 8.1, 10.9 across 5 runs |
+  | `ubuntu-24.04` x86_64 | 1.354, one run |
+  | `ubuntu-24.04-arm` aarch64 | 5.062, one run |
+
+  The two CI figures are single runs and are labelled as such. The first version of this
+  measurement reported 0.000 ns because the state object never escaped and the compiler
+  deleted the loop; it is now static and read back, which is recorded because a measurement
+  that silently measures nothing is this project's documented failure mode.
 
   **DECISION-RELEVANCE — the verdict the brief asked for, against the tap.** The tap costs
   1.74 ns per arrival at one thread and 134 ns at eight on this host. The spin contributes
