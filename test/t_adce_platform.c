@@ -246,6 +246,172 @@ static int entropy_region_written(const uint8_t *b, size_t lo, size_t hi) {
     return 0;
 }
 
+/* THE SEQLOCK SPIN, CONSTRUCTED RATHER THAN WAITED FOR -- and it is the SOLE
+ * guard against accepting a mid-write state.
+ *
+ * Entry (4) called this "the retry path". There is only one loop in the whole
+ * read path: the entry spin in adce_seqlock_read_begin, which waits while the
+ * sequence is odd. adce_epoch_read contains zero `while` statements -- on a
+ * torn read it RETURNS 0 and the caller does not read again -- so the torn
+ * branch is not a retry.
+ *
+ * THE FINDING THIS CASE PINS, which is stronger than a timing number.
+ * adce_seqlock_read_retry compares the sequence against the value the reader
+ * started from and never checks that value's PARITY:
+ *
+ *     return s != start;
+ *
+ * So a reader that begins inside a write AND finishes inside the same write
+ * sees an unchanged sequence, concludes nothing moved, and ACCEPTS a payload
+ * the writer had not finished assembling. Nothing downstream of that predicate
+ * catches it. The entry spin is the only thing standing between a caller and a
+ * mid-write state, which makes it load-bearing rather than an optimisation --
+ * and the case below demonstrates exactly that rather than asserting it.
+ *
+ * BRANCH 3 in the sense CLAUDE.md's printed-universal rule means it. The spin
+ * is normally entered by luck, at odds of the write window over the epoch
+ * cadence, which is small enough that a bounded run can see none. Here the
+ * schedule is CONSTRUCTED: the writer opens the window by hand, leaves the
+ * payload deliberately half-assembled, and holds. Every verdict below is then
+ * an equality with no timing threshold anywhere.
+ *
+ * WHAT IS ASSERTED AND WHAT IS ONLY PRINTED. The verdicts are asserted. The
+ * elapsed time of the spinning read is PRINTED and never asserted: it is a
+ * property of the host's scheduler and a threshold on it would be a band with
+ * no derivation. */
+#define SQ_HOLD_NS (5ULL * 1000ULL * 1000ULL)
+
+static adce_epoch_state_t g_sq_epoch;
+static _Atomic int g_sq_window_open;
+static _Atomic int g_sq_probe_done;
+static _Atomic uint64_t g_sq_read_ns;
+static _Atomic uint64_t g_sq_probe_seq;
+static _Atomic int g_sq_probe_rc;
+static _Atomic uint64_t g_sq_probe_epoch;
+static _Atomic int64_t g_sq_probe_pressure;
+static _Atomic int g_sq_real_rc;
+static _Atomic uint64_t g_sq_real_epoch;
+static _Atomic int64_t g_sq_real_pressure;
+
+/* adce_epoch_read with the entry spin REMOVED and nothing else changed: same
+ * loads, same retry predicate. It exists to show what the spin prevents, and is
+ * never used as a stand-in for the real reader. */
+static int sq_read_nospin(const adce_epoch_state_t *st, uint64_t *seen_seq,
+                          uint64_t *epoch_id, adce_q16_t *pressure) {
+    uint64_t s0 = atomic_load_explicit(&st->sequence, memory_order_acquire);
+    adce_q16_t p = atomic_load_explicit(&st->pressure, memory_order_relaxed);
+    uint64_t e = atomic_load_explicit(&st->epoch_id, memory_order_relaxed);
+    uint64_t t = atomic_load_explicit(&st->observed_at_ns, memory_order_relaxed);
+    (void)t;
+    *seen_seq = s0;
+    if (adce_seqlock_read_retry(&st->sequence, s0)) {
+        return 0;
+    }
+    *epoch_id = e;
+    *pressure = p;
+    return 1;
+}
+
+static void *sq_reader_main(void *arg) {
+    uint64_t seen = 0, pe = 0, re = 0, observed = 0, t0;
+    adce_q16_t pp = 0, rp = 0;
+    int rc;
+    (void)arg;
+
+    while (atomic_load_explicit(&g_sq_window_open, memory_order_acquire) == 0) {
+        ADCE_CPU_RELAX();
+    }
+
+    rc = sq_read_nospin(&g_sq_epoch, &seen, &pe, &pp);
+    atomic_store_explicit(&g_sq_probe_seq, seen, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_probe_rc, rc, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_probe_epoch, pe, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_probe_pressure, (int64_t)pp, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_probe_done, 1, memory_order_release);
+
+    t0 = adce_now_ns();
+    rc = adce_epoch_read(&g_sq_epoch, &rp, &re, &observed);
+    atomic_store_explicit(&g_sq_read_ns, adce_now_ns() - t0, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_real_rc, rc, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_real_epoch, re, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_real_pressure, (int64_t)rp, memory_order_relaxed);
+    return NULL;
+}
+
+static int test_seqlock_retry_constructed(void) {
+    pthread_t reader;
+    uint64_t hold_start;
+
+    memset(&g_sq_epoch, 0, sizeof(g_sq_epoch));
+    atomic_store_explicit(&g_sq_window_open, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_probe_done, 0, memory_order_relaxed);
+
+    /* Committed state A: pressure 0, epoch 1. So "the reader saw epoch 2 with
+     * pressure ONE" cannot be the zero-initialised state or state A. */
+    adce_epoch_publish(&g_sq_epoch, (adce_q16_t)0, 1u, 1000u);
+
+    ADCE_TEST_ASSERT(pthread_create(&reader, NULL, sq_reader_main, NULL) == 0);
+
+    /* Open the window and leave the payload HALF ASSEMBLED: epoch advances to
+     * 2 while pressure still holds state A's value. (0, 2) is a pair that no
+     * committed state ever carries, which is what makes the probe's observation
+     * proof rather than inference. */
+    adce_seqlock_write_begin(&g_sq_epoch.sequence);
+    atomic_store_explicit(&g_sq_epoch.epoch_id, 2u, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_window_open, 1, memory_order_release);
+
+    while (atomic_load_explicit(&g_sq_probe_done, memory_order_acquire) == 0) {
+        ADCE_CPU_RELAX();
+    }
+
+    /* Finish assembling only after the probe has looked. */
+    atomic_store_explicit(&g_sq_epoch.pressure, ADCE_Q16_ONE, memory_order_relaxed);
+    atomic_store_explicit(&g_sq_epoch.observed_at_ns, 2000u, memory_order_relaxed);
+
+    hold_start = adce_now_ns();
+    while (adce_now_ns() - hold_start < SQ_HOLD_NS) {
+        ADCE_CPU_RELAX();
+    }
+    adce_seqlock_write_end(&g_sq_epoch.sequence);
+
+    ADCE_TEST_ASSERT(pthread_join(reader, NULL) == 0);
+
+    /* 1. The window was provably open when the probe looked. Direct
+     *    observation of an odd sequence, not an inference from timing. */
+    ADCE_TEST_ASSERT((atomic_load_explicit(&g_sq_probe_seq,
+                                           memory_order_relaxed) & 1u) == 1u);
+
+    /* 2. THE FINDING. Without the entry spin the read SUCCEEDS -- the retry
+     *    predicate cannot see that the start value was odd. */
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_rc, memory_order_relaxed) == 1);
+
+    /* 3. And what it accepted was a state the writer never committed. */
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_epoch, memory_order_relaxed) == 2u);
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_pressure,
+                                          memory_order_relaxed) == 0);
+
+    /* 4. The real reader spun, waited out the whole hold, and returned the
+     *    COMPLETE post-write state. */
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_real_rc, memory_order_relaxed) == 1);
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_real_epoch, memory_order_relaxed) == 2u);
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_real_pressure,
+                                          memory_order_relaxed) == (int64_t)ADCE_Q16_ONE);
+
+    printf("  SEQLOCK spin CONSTRUCTED: probe saw sequence %llu (odd) and"
+           " ACCEPTED the half-assembled state (epoch=2, pressure=0) -- the"
+           " retry predicate never checks start parity, so the entry spin is"
+           " the sole guard. Real read waited and returned epoch 2 with"
+           " pressure %lld, taking %llu ns against a %llu ns hold -- PRINTED,"
+           " NOT ASSERTED\n",
+           (unsigned long long)atomic_load_explicit(&g_sq_probe_seq,
+                                                    memory_order_relaxed),
+           (long long)ADCE_Q16_ONE,
+           (unsigned long long)atomic_load_explicit(&g_sq_read_ns,
+                                                    memory_order_relaxed),
+           (unsigned long long)SQ_HOLD_NS);
+    return 0;
+}
+
 static int test_platform_entropy(void) {
     /* Lengths chosen around the 256-byte getentropy limit: below it, exactly
      * on it, one past it -- which is the smallest input that forces a second
@@ -498,6 +664,7 @@ int main(void) {
         {"q16_boundaries", test_q16_boundaries},
         {"token_bucket", test_token_bucket},
         {"rng", test_rng},
+        {"seqlock_retry_constructed", test_seqlock_retry_constructed},
         {"platform_entropy", test_platform_entropy},
         {"time_source", test_time_source},
         {"epoch_state_lock_free", test_epoch_state_lock_free},
