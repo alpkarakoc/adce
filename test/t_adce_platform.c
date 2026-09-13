@@ -627,6 +627,8 @@ int adce_t_obs_writer_claim(void);
 int adce_t_obs_cadence(void);
 int adce_t_obs_determinism(void);
 int adce_t_obs_tap_counter(void);
+int adce_t_obs_drain_covers_claimed(void);
+int adce_t_obs_claim_capacity(void);
 
 /* Enforcement Plane cases, same convention: static in test/t_adce_enforce.c so
  * the ran-tests guard sees them, forwarded here to reach this runner table. */
@@ -702,6 +704,8 @@ int main(void) {
         {"obs_cadence", adce_t_obs_cadence},
         {"obs_determinism", adce_t_obs_determinism},
         {"obs_tap_counter", adce_t_obs_tap_counter},
+        {"obs_drain_covers_claimed", adce_t_obs_drain_covers_claimed},
+        {"obs_claim_capacity", adce_t_obs_claim_capacity},
         {"enf_shed_mapping", adce_t_enf_shed_mapping},
         {"enf_shed_monotone", adce_t_enf_shed_monotone},
         {"enf_read_clamp", adce_t_enf_read_clamp},
