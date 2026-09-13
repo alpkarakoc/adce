@@ -246,8 +246,8 @@ static int entropy_region_written(const uint8_t *b, size_t lo, size_t hi) {
     return 0;
 }
 
-/* THE SEQLOCK SPIN, CONSTRUCTED RATHER THAN WAITED FOR -- and it is the SOLE
- * guard against accepting a mid-write state.
+/* THE SEQLOCK SPIN, CONSTRUCTED RATHER THAN WAITED FOR -- and, since the retry
+ * predicate was hardened, ONE OF TWO guards rather than the sole one.
  *
  * Entry (4) called this "the retry path". There is only one loop in the whole
  * read path: the entry spin in adce_seqlock_read_begin, which waits while the
@@ -255,18 +255,33 @@ static int entropy_region_written(const uint8_t *b, size_t lo, size_t hi) {
  * torn read it RETURNS 0 and the caller does not read again -- so the torn
  * branch is not a retry.
  *
- * THE FINDING THIS CASE PINS, which is stronger than a timing number.
- * adce_seqlock_read_retry compares the sequence against the value the reader
- * started from and never checks that value's PARITY:
+ * WHAT THIS CASE PINNED, AND WHAT CHANGED. It was written when
+ * adce_seqlock_read_retry read
  *
  *     return s != start;
  *
- * So a reader that begins inside a write AND finishes inside the same write
- * sees an unchanged sequence, concludes nothing moved, and ACCEPTS a payload
- * the writer had not finished assembling. Nothing downstream of that predicate
- * catches it. The entry spin is the only thing standing between a caller and a
- * mid-write state, which makes it load-bearing rather than an optimisation --
- * and the case below demonstrates exactly that rather than asserting it.
+ * which never checked the parity of the value the reader started from. A reader
+ * that began inside a write AND finished inside the same write saw an unchanged
+ * sequence, concluded nothing had moved, and ACCEPTED a payload the writer had
+ * not finished assembling. This case asserted exactly that, which made the
+ * entry spin the SOLE guard against a mid-write state.
+ *
+ * The predicate is now
+ *
+ *     return (start & 1U) || s != start;
+ *
+ * so an odd start is rejected on its own and the probe below FAILS where it
+ * used to succeed. The two guards are not redundant, and the difference is why
+ * both are kept: the retry predicate makes a no-spin reader FAIL, while the
+ * entry spin makes the composed reader WAIT and then succeed. Assertion 4 keeps
+ * that second half honest -- without the spin the real reader would fail too,
+ * not merely be slower.
+ *
+ * THE ANTI-VACUITY GUARD survived the hardening because it never rested on the
+ * probe's verdict. Assertion 1 observes the SAMPLED SEQUENCE directly and
+ * asserts it is odd: proof the window was open at that instant, with no sleep,
+ * no band and no host assumption. Had the writer already released, the sampled
+ * sequence would be even and this case would fail rather than pass quietly.
  *
  * BRANCH 3 in the sense CLAUDE.md's printed-universal rule means it. The spin
  * is normally entered by luck, at odds of the write window over the epoch
@@ -313,8 +328,11 @@ static int sq_read_nospin(const adce_epoch_state_t *st, uint64_t *seen_seq,
 }
 
 static void *sq_reader_main(void *arg) {
-    uint64_t seen = 0, pe = 0, re = 0, observed = 0, t0;
-    adce_q16_t pp = 0, rp = 0;
+    /* Sentinels, so a probe that returns 0 can be shown to have written
+     * NOTHING rather than to have written a zero that matches an
+     * initialiser. No committed state carries either value. */
+    uint64_t seen = 0, pe = 0xDEADu, re = 0, observed = 0, t0;
+    adce_q16_t pp = (adce_q16_t)0x5A5A, rp = 0;
     int rc;
     (void)arg;
 
@@ -381,14 +399,20 @@ static int test_seqlock_retry_constructed(void) {
     ADCE_TEST_ASSERT((atomic_load_explicit(&g_sq_probe_seq,
                                            memory_order_relaxed) & 1u) == 1u);
 
-    /* 2. THE FINDING. Without the entry spin the read SUCCEEDS -- the retry
-     *    predicate cannot see that the start value was odd. */
-    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_rc, memory_order_relaxed) == 1);
+    /* 2. THE HARDENING, asserted rather than described. Without the entry spin
+     *    the read now FAILS: the retry predicate rejects an odd start on its
+     *    own. Before the hardening this same probe returned 1 and accepted a
+     *    half-assembled payload, so this line is the in-gate mutation proof --
+     *    revert the predicate and it goes red on every profile. */
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_rc, memory_order_relaxed) == 0);
 
-    /* 3. And what it accepted was a state the writer never committed. */
-    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_epoch, memory_order_relaxed) == 2u);
+    /* 3. And the failure is FAIL-CLOSED: nothing was written through. Both
+     *    out-parameters still hold their sentinels, which no committed state
+     *    carries, so "untouched" is proved rather than inferred from a zero. */
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_epoch,
+                                          memory_order_relaxed) == 0xDEADu);
     ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_probe_pressure,
-                                          memory_order_relaxed) == 0);
+                                          memory_order_relaxed) == (int64_t)0x5A5A);
 
     /* 4. The real reader spun, waited out the whole hold, and returned the
      *    COMPLETE post-write state. */
@@ -397,11 +421,10 @@ static int test_seqlock_retry_constructed(void) {
     ADCE_TEST_ASSERT(atomic_load_explicit(&g_sq_real_pressure,
                                           memory_order_relaxed) == (int64_t)ADCE_Q16_ONE);
 
-    printf("  SEQLOCK spin CONSTRUCTED: probe saw sequence %llu (odd) and"
-           " ACCEPTED the half-assembled state (epoch=2, pressure=0) -- the"
-           " retry predicate never checks start parity, so the entry spin is"
-           " the sole guard. Real read waited and returned epoch 2 with"
-           " pressure %lld, taking %llu ns against a %llu ns hold -- PRINTED,"
+    printf("  SEQLOCK spin CONSTRUCTED: probe saw sequence %llu (odd) and was"
+           " REJECTED by the hardened retry predicate with nothing written"
+           " through. Real read waited and returned epoch 2 with pressure"
+           " %lld, taking %llu ns against a %llu ns hold -- PRINTED,"
            " NOT ASSERTED\n",
            (unsigned long long)atomic_load_explicit(&g_sq_probe_seq,
                                                     memory_order_relaxed),

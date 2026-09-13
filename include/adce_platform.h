@@ -431,7 +431,7 @@ static inline uint64_t adce_seqlock_read_begin(const adce_seq_t *seq) {
 static inline int adce_seqlock_read_retry(const adce_seq_t *seq, uint64_t start) {
     atomic_thread_fence(memory_order_acquire);
     uint64_t s = atomic_load_explicit(seq, memory_order_acquire);
-    return s != start;
+    return (start & 1U) || s != start;
 }
 
 /* ===========================================================================
