@@ -30,13 +30,31 @@
  * RUNS.   10 independent executions per (arm, T). Every figure is reported with
  *         its n beside it.
  *
- * TWO ARMS, and the second is the control that makes this discriminating:
+ * THREE ARMS. The second is the control that makes the first discriminating;
+ * the third is the shipped configuration as of the per-thread-counter change,
+ * and it is measured AGAINST the control rather than on its own.
  *
- *   SHARED  -- one adce_obs_counter_t for all T threads. The shipped
- *              configuration: t_adce_harness.c assigns every site the same
- *              counter, and the Observation Plane has exactly one.
- *   PRIVATE -- one adce_obs_counter_t PER THREAD. Same instruction, same
- *              atomic, same alignment, no sharing.
+ *   SHARED  -- one adce_obs_counter_t for all T threads. The configuration
+ *              this project shipped until the per-thread counter landed, kept
+ *              here as the thing that was overturned.
+ *   PRIVATE -- one adce_obs_counter_t PER THREAD, standalone objects. Same
+ *              instruction, same atomic, same alignment, no sharing. The
+ *              control: an idealised lower bound with no library between the
+ *              thread and its counter.
+ *   SLOTS   -- THE SHIPPED CONFIGURATION. A real adce_obs_ctx_t; each thread
+ *              calls adce_obs_claim_counter() once and taps through the
+ *              returned pointer. Differs from PRIVATE in exactly one respect
+ *              -- the counters are slots inside one context object rather than
+ *              separate objects -- so the comparison isolates whether owning
+ *              the slots in the context reintroduces anything.
+ *
+ *   THE PRE-REGISTERED ACCEPTANCE TARGET IS THE PRIVATE ARM. SLOTS is
+ *   predicted to match it within run-to-run spread at every T. It is not
+ *   predicted to match it exactly, and the reason is named in advance: the
+ *   slots are contiguous inside adce_obs_ctx_t, so consecutive slots share a
+ *   page and, on a host whose cache line is narrower than the padding, could
+ *   share nothing else. Any gap between SLOTS and PRIVATE is the cost of
+ *   library ownership and is reported as such rather than absorbed.
  *
  *   The arms differ in one variable only: whether the line is shared. If the
  *   cost of the atomic RMW itself were the story, both arms would rise
@@ -155,6 +173,8 @@ static int bench_run(const char *arm, unsigned nthreads, uint64_t arrivals,
                      unsigned run_index) {
     static adce_obs_counter_t shared;
     static adce_obs_counter_t privately[BENCH_MAX_THREADS];
+    static adce_obs_ctx_t slotted;
+    static adce_epoch_state_t slot_epoch;
     pthread_t tid[BENCH_MAX_THREADS];
     bench_thread_t ctx[BENCH_MAX_THREADS];
     _Atomic uint64_t ready;
@@ -164,11 +184,27 @@ static int bench_run(const char *arm, unsigned nthreads, uint64_t arrivals,
 
     memset(&shared, 0, sizeof(shared));
     memset(privately, 0, sizeof(privately));
+    memset(&slot_epoch, 0, sizeof(slot_epoch));
+    adce_obs_init(&slotted, &slot_epoch);
     atomic_store_explicit(&ready, (uint64_t)0, memory_order_relaxed);
     atomic_store_explicit(&go, 0, memory_order_relaxed);
 
     for (i = 0; i < nthreads; ++i) {
-        ctx[i].counter = (strcmp(arm, "shared") == 0) ? &shared : &privately[i];
+        if (strcmp(arm, "shared") == 0) {
+            ctx[i].counter = &shared;
+        } else if (strcmp(arm, "slots") == 0) {
+            /* Claimed on the main thread rather than inside bench_main: a
+             * claim is a startup act, and doing it after the barrier would
+             * time the CAS loop as though it were part of the arrival path. */
+            ctx[i].counter = adce_obs_claim_counter(&slotted);
+            if (ctx[i].counter == NULL) {
+                fprintf(stderr, "FAIL: registry full at thread %u -- raise "
+                                "ADCE_OBS_MAX_INGRESS\n", i);
+                return 1;
+            }
+        } else {
+            ctx[i].counter = &privately[i];
+        }
         ctx[i].arrivals = arrivals;
         ctx[i].elapsed_ns = 0;
         ctx[i].ready = &ready;
@@ -210,6 +246,18 @@ static int bench_run(const char *arm, unsigned nthreads, uint64_t arrivals,
 
     /* The shared arm's counter must hold exactly what was tapped. A lost
      * increment would mean the thing being timed is not the thing that runs. */
+    if (strcmp(arm, "slots") == 0) {
+        /* The drain must return exactly what was tapped. Without this the
+         * arm could be timing taps that the plane never counts, which is the
+         * one way a fast number here would mean nothing. */
+        uint64_t got = adce_obs_drain(&slotted);
+        if (got != arrivals * nthreads) {
+            fprintf(stderr, "FAIL: slots drain %llu != %llu\n",
+                    (unsigned long long)got,
+                    (unsigned long long)(arrivals * nthreads));
+            return 1;
+        }
+    }
     if (strcmp(arm, "shared") == 0) {
         uint64_t got = atomic_load_explicit(&shared.arrivals,
                                             memory_order_relaxed);
@@ -241,6 +289,9 @@ int main(int argc, char **argv) {
                 return 1;
             }
             if (bench_run("private", sweep[s], arrivals, r) != 0) {
+                return 1;
+            }
+            if (bench_run("slots", sweep[s], arrivals, r) != 0) {
                 return 1;
             }
         }
