@@ -1171,6 +1171,108 @@ looking.
   Note the asymmetry before deciding: the convention it names is still doing work even if the
   function is not. "No `double` and no `adce_rng_next_unit`" is a live rule about the
   Enforcement Plane whether or not anything calls the function.
+
+- **THE INTERNAL-USE CHECK LANDED, AND THE REBASE ONTO #38 WAS ITS FIRST MUTATION TEST.**
+  #26 sat unmerged for four days while the API surface it measures moved underneath it. The
+  rebase is therefore not a chore — it is the only opportunity this gate will ever have to be
+  tested against annotations written by someone who could not run it.
+
+  **#38 WROTE TWO ANNOTATIONS BLIND, AND BOTH PASSED ON FIRST CONTACT.**
+  `adce_obs_claim_counter` and `adce_obs_residual` were marked
+  `ADCE_PUBLIC_NO_INTERNAL_USER` while no gate existed to read the marker — filed item 6, a
+  marker with no gate. On the rebased tree the predicate parsed both, extracted both reasons,
+  and listed them as declared rather than as defects. **Nothing was adjusted to make that
+  happen; the format survived transmission without enforcement.**
+
+  **n = 2, and that caveat is the whole of what may be concluded.** Two annotations by one
+  author in one pull request, written from the spec in a document rather than from the
+  predicate. It is evidence that the format is writable from its description — which is a
+  real property and the one filed item 6 doubted — and it is not evidence that an unenforced
+  convention survives generally. The next unannotated symbol is a fresh sample, and the check
+  is now present to take it.
+
+  **RE-MEASURED ON THE REBASED TREE RATHER THAN CARRIED.** The 14-of-37 figure was taken
+  against the pre-#38 surface; both numbers below were produced by running the script, the
+  old one against a reconstructed pre-#38 tree carrying #26's original annotations:
+
+  | | functions in `include/` | shipping caller | annotated | UNEXPLAINED |
+  |---|---|---|---|---|
+  | before #38 (`9ac1713`) | 37 | 23 | 12 | 2 |
+  | after #38 (this branch) | **40** | **24** | **14** | **2** |
+
+  It fires on 16 of 40 where it fired on 14 of 37. **The delta is read off the diff, not
+  argued:** #38 added exactly three functions to `include/` and removed none —
+  `adce_obs_claim_counter`, `adce_obs_drain`, `adce_obs_residual`. `adce_obs_drain` has
+  shipping callers in `src/adce_obs_thread.c` and `src/adce_observe.c`, so it joins the live
+  column; the other two have none and are annotated. 23+1, 12+2, and the two reds untouched.
+  **No previously-live function fell to zero, and nothing new went red.**
+
+  **THE THREE GROUPS DO NOT STILL HOLD, AND THAT IS THE FINDING.** They were: four consumer
+  entry points, eight Q16 lane functions, two genuinely open. `adce_obs_claim_counter` lands
+  cleanly in the first — claiming a counter is the consumer's act exactly as tapping is, so
+  the group is now five. **`adce_obs_residual` lands in none of them**, and its own annotation
+  says so in its own words: *"the residual term of the overrun identity, which only a test
+  evaluates"*.
+
+  A public function whose only caller is a test is the exact shape of
+  `adce_epoch_is_stale` — category (2) of the open API question above, "dead code with a test
+  suite attached" — and it is sitting in the GREEN column behind a well-formed annotation.
+  That is not a defect in the predicate and the annotation is not dishonest; the reason is
+  true, and the gate cannot distinguish "a consumer calls it" from "a test calls it" because
+  that distinction is not in the call graph it reads.
+
+  **What actually happened is the gate working on its first day.** It forced a reason to be
+  written, and the written reason discloses the problem. Left alone, `adce_obs_residual` would
+  have looked internally-unused-by-design forever. **Recorded as a THIRD OPEN API QUESTION and
+  deliberately NOT resolved here:** changing or removing a public function is an API decision
+  that must be proposed and waited on, and this pull request's scope is landing the gate. The
+  question is whether `adce_obs_residual` is a consumer-facing auditing accessor — in which
+  case its annotation should say that instead of naming a test — or test scaffolding that
+  should not be in a public header.
+
+  **THE INTERPRETER IS A HARD DEPENDENCY, AND ITS ABSENCE IS NOW A LOUD, ATTRIBUTING
+  FAILURE.** Settled from the scripts rather than from intent.
+
+  *Where it is required:* **CI only.** `.github/workflows/verify.yml` is the sole invoker.
+  Neither `scripts/verify.sh` nor `scripts/verify-linux-gcc.sh` nor anything under
+  `scripts/hooks/` runs this script, so macOS not guaranteeing `python3` does not affect the
+  development gate. A developer running the check by hand needs it; no gate on that host does.
+
+  *What happened when it was absent, measured by removing `python3` from `PATH`:* the script
+  already failed — `set -e` carries bash's exit 127 out, so it never passed and never skipped,
+  which is the important half. But everything it printed was
+
+      ./scripts/check-internal-use.sh: line 48: python3: command not found
+
+  **a line of shell, not a gate.** This document already ranks an unattributable red as a
+  defect of its own — it is why the stale-posture failure prints `aged=N` beside torn and
+  future rather than a bare assertion number. A red that does not say what it was checking
+  invites the reading that the check is broken, and the step after that reading is to skip it.
+
+  Repaired with an explicit preflight that names the gate, says the check DID NOT RUN and has
+  no answer to report, states where it is expected to run, and says there is no flag that
+  turns it into a pass. Both the absent-interpreter path and the two-open-questions path exit
+  1, with entirely different messages, so the two reds can never be confused. **There is
+  deliberately no environment variable that converts this to a skip**: a gate that passes
+  because an interpreter is missing is the class this project ranks worse than no gate at all.
+
+  **THE FIVE-PULL-REQUEST ANSWER WINDOW STARTS AT THIS MERGE, and it has never run before.**
+  The two reds — `adce_epoch_is_stale` and `adce_rng_next_unit` — stay unannotated by
+  decision. The red IS the open API question, held visible rather than papered over with a
+  marker.
+
+  **The cost of a proposed-but-unlanded gate, measured.** #26 was opened 2026-09-10 and
+  **twelve pull requests merged before it** — #23, #24, #25, #29, #31, #32, #33, #34, #35,
+  #36, #37, #38 — every one of them under a check that existed only as a branch. For that
+  whole window this document's five-gate table listed `internal-use` as a gate, and #38
+  annotated two new public functions for it and reasoned about the annotation as a
+  cross-gate interaction. **A proposal reads as a control to everyone downstream of it.**
+  That is a sharper version of the same failure this document already collects: a gate that
+  is silent is indistinguishable from a gate that passed, and a gate that is *unmerged* is
+  indistinguishable from a gate that is *present* to anyone reading the record rather than
+  the workflow. #38 caught it only by grepping the workflow and finding the string exactly
+  once, inside a comment. The window starts now because now is the first moment there is
+  anything to measure.
 - **A NEW GATE'S FIRST DUTY IS TO BE SHOWN FAILING on a change it must catch, evaluated in
   this repository's actual file layout, before it is proposed.** The standing rule the
   `boundary-note` defect produced, and the defect itself.

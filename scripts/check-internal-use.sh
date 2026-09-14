@@ -45,6 +45,48 @@ set -euo pipefail
 
 cd "${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
+# THE INTERPRETER IS A HARD DEPENDENCY AND ITS ABSENCE IS A FAILURE, NOT A SKIP.
+#
+# Without this guard the script still fails -- `set -e` carries bash's exit 127
+# out -- but the only thing printed is
+#
+#     ./scripts/check-internal-use.sh: line 48: python3: command not found
+#
+# which names a line of shell and not a gate. This repository already ranks an
+# unattributable red as a defect in its own right: it is why the stale-posture
+# failure prints `aged=N` beside torn and future instead of a bare assertion
+# number. A check that goes red without saying what it was checking invites the
+# reading that the check is broken, and the next step after that reading is to
+# skip it.
+#
+# It must never become a SKIP. A gate that passes because an interpreter is
+# missing is the class this project has ruled worse than no gate at all -- the
+# green tick would be indistinguishable from the green tick of a check that ran.
+# So the absent interpreter exits 1 with a message, and there is deliberately no
+# environment variable that turns this into a pass.
+if ! command -v python3 >/dev/null 2>&1; then
+    cat >&2 <<'EOM'
+FAIL: internal-use check did NOT RUN -- python3 is not on PATH.
+
+This is a FAILURE, not a skip, and the distinction is the point. The check
+asks whether every function in include/ has a shipping call site or says why
+not. With no interpreter it asked nothing, so it has no answer to report, and
+reporting a pass would make "the check ran and was satisfied" and "the check
+never executed" look identical from the outside.
+
+WHERE THIS IS EXPECTED TO RUN: the internal-use job in
+.github/workflows/verify.yml, on ubuntu-24.04, which ships python3. No local
+gate invokes this script -- neither scripts/verify.sh nor
+scripts/verify-linux-gcc.sh nor anything under scripts/hooks/ -- so a
+development machine without python3 does not hit this path unless the script
+is run by hand.
+
+TO FIX: install python3, or run the check on a host that has it. There is no
+flag that makes this pass.
+EOM
+    exit 1
+fi
+
 python3 - "$@" <<'PY'
 import re, sys, pathlib
 
