@@ -335,17 +335,18 @@ static int test_harness_tap_after_gate(void) {
  * ===================================================================== */
 
 static int test_harness_observer_lifecycle(void) {
-    static adce_obs_counter_t counter;
     static adce_epoch_state_t epoch;
     adce_obs_thread_t obs;
     adce_q16_t pressure;
     uint64_t epoch_id;
     uint64_t observed_at_ns;
 
-    memset(&counter, 0, sizeof(counter));
     memset(&epoch, 0, sizeof(epoch));
 
-    ADCE_TEST_ASSERT(adce_obs_thread_start(&obs, &counter, &epoch) == 1);
+    /* This case never taps -- it tests the observer's lifecycle, not ingress --
+     * so it claims no counter. The drain then runs over zero claimed slots,
+     * which is the O(claimed) path at its lower bound. */
+    ADCE_TEST_ASSERT(adce_obs_thread_start(&obs, &epoch) == 1);
 
     /* Ten epochs of real time. Enough that the loop has certainly serviced a
      * deadline; nowhere near ADCE_OBS_WARMUP_EPOCHS. */
@@ -398,7 +399,6 @@ static int test_harness_observer_lifecycle(void) {
 #define HARNESS_PUBLISH_WAIT_NS (15ULL * 1000ULL * 1000ULL * 1000ULL)
 #define HARNESS_OVERLAP_EPOCHS 30ULL
 
-static adce_obs_counter_t g_h_counter;
 static adce_epoch_state_t g_h_epoch;
 static harness_site_t g_h_sites[HARNESS_INGRESS_THREADS];
 static _Atomic int g_h_stop;
@@ -658,7 +658,6 @@ static int test_harness_concurrent(void) {
     uint64_t observed_at_ns = 0;
     int published = 0;
 
-    memset(&g_h_counter, 0, sizeof(g_h_counter));
     memset(&g_h_epoch, 0, sizeof(g_h_epoch));
     atomic_store_explicit(&g_h_stop, 0, memory_order_release);
     atomic_store_explicit(&g_h_snap_now, 0, memory_order_release);
@@ -671,10 +670,20 @@ static int test_harness_concurrent(void) {
         memset(&g_h_sites[i], 0, sizeof(g_h_sites[i]));
         /* One counter, many tappers: the many-writer contract the padding in
          * adce_observe.h exists for. */
-        g_h_sites[i].counter = &g_h_counter;
+        g_h_sites[i].counter = NULL; /* claimed after the observer starts */
     }
 
-    ADCE_TEST_ASSERT(adce_obs_thread_start(&obs, &g_h_counter, &g_h_epoch) == 1);
+    ADCE_TEST_ASSERT(adce_obs_thread_start(&obs, &g_h_epoch) == 1);
+
+    /* ONE SLOT PER INGRESS THREAD. This is the configuration the change
+     * exists for: four ingress threads, four private cache lines, no shared
+     * counter on the arrival path. A NULL here means the registry is full and
+     * the contract says the thread must not run, so it is asserted rather than
+     * worked around. */
+    for (i = 0; i < HARNESS_INGRESS_THREADS; ++i) {
+        g_h_sites[i].counter = adce_obs_claim_counter(&obs.ctx);
+        ADCE_TEST_ASSERT(g_h_sites[i].counter != NULL);
+    }
 
     /* Read before the threads exist, so every bucket's refill window is a
      * subset of [started_ns, elapsed]. Over-measuring elapsed only weakens the
@@ -954,7 +963,13 @@ static int test_harness_concurrent(void) {
                (unsigned long long)sum_tau);
     }
 
-    residual = atomic_load_explicit(&g_h_counter.arrivals, memory_order_relaxed);
+    /* THE ONE ASSERTION WHOSE SHAPE CHANGED. `residual` was one atomic load of
+     * a single shared counter; it is now a SUM over claimed slots. The identity
+     * itself is unchanged and still exact, because each arrival increments
+     * exactly one slot and each slot is drained into exactly one accumulator --
+     * so summing over slots is the same total arrived at from four places
+     * instead of one. */
+    residual = adce_obs_residual(&obs.ctx);
     ADCE_TEST_ASSERT(total_tapped ==
                      obs.ctx.arrivals_closed + obs.discarded_arrivals + residual);
 
@@ -1050,7 +1065,6 @@ typedef struct {
     _Atomic int observed_phase;
 } harness_phased_t;
 
-static adce_obs_counter_t g_st_counter;
 static adce_epoch_state_t g_st_epoch;
 static adce_obs_ctx_t g_st_obs;
 static harness_phased_t g_st_sites[HARNESS_STALE_THREADS];
@@ -1107,7 +1121,7 @@ static void *harness_closer_main(void *arg) {
                  * reason. */
                 if (atomic_exchange_explicit(&g_st_thaw, 0,
                                              memory_order_acq_rel)) {
-                    g_st_thaw_discarded += adce_obs_counter_take(g_st_obs.counter);
+                    g_st_thaw_discarded += adce_obs_drain(&g_st_obs);
                 }
                 (void)adce_obs_epoch_close(&g_st_obs, now_ns);
             }
@@ -1516,14 +1530,14 @@ static int test_harness_stale_posture(void) {
     uint64_t total_tapped = 0;
     uint64_t residual;
 
-    memset(&g_st_counter, 0, sizeof(g_st_counter));
     memset(&g_st_epoch, 0, sizeof(g_st_epoch));
-    adce_obs_init(&g_st_obs, &g_st_counter, &g_st_epoch);
+    adce_obs_init(&g_st_obs, &g_st_epoch);
     g_st_thaw_discarded = 0;
 
     for (i = 0; i < HARNESS_STALE_THREADS; ++i) {
         memset(&g_st_sites[i], 0, sizeof(g_st_sites[i]));
-        g_st_sites[i].site.counter = &g_st_counter;
+        g_st_sites[i].site.counter = adce_obs_claim_counter(&g_st_obs);
+        ADCE_TEST_ASSERT(g_st_sites[i].site.counter != NULL);
     }
 
     atomic_store_explicit(&g_st_phase, HARNESS_PH_PRIME, memory_order_release);
@@ -1770,7 +1784,8 @@ static int test_harness_stale_posture(void) {
      * closer are already joined above, and g_st_obs.arrivals_closed /
      * g_st_thaw_discarded are each written by exactly one of those now-joined
      * threads. */
-    residual = atomic_load_explicit(&g_st_counter.arrivals, memory_order_relaxed);
+    /* Summed over claimed slots -- see the note in test_harness_concurrent. */
+    residual = adce_obs_residual(&g_st_obs);
     ADCE_TEST_ASSERT(total_tapped ==
                      g_st_obs.arrivals_closed + g_st_thaw_discarded + residual);
 

@@ -30,13 +30,22 @@ static int obs_close(double got, double want, double tol) {
 
 /* The counter and the epoch state are cache-line aligned, so they are given
  * static storage rather than put on the stack. */
-static adce_obs_counter_t g_obs_counter;
+/* Now a POINTER to a slot the context owns, claimed by obs_fresh. The counter
+ * is no longer a caller-provided object: adce_obs_init takes only the epoch,
+ * and an ingress thread reaches its counter through adce_obs_claim_counter. */
+static adce_obs_counter_t *g_obs_counter;
 static adce_epoch_state_t g_obs_epoch;
+static adce_obs_counter_t *g_det_counter;
 
-static void obs_fresh(adce_obs_ctx_t *ctx, adce_obs_counter_t *counter,
-                      adce_epoch_state_t *epoch) {
+/* Returns 1 on success. The claim can fail -- at capacity it returns NULL --
+ * and a fixture that ignored that would inject arrivals through a null
+ * pointer, so callers assert on it rather than trusting it. */
+static int obs_fresh(adce_obs_ctx_t *ctx, adce_epoch_state_t *epoch,
+                     adce_obs_counter_t **slot) {
     memset(epoch, 0, sizeof(*epoch));
-    adce_obs_init(ctx, counter, epoch);
+    adce_obs_init(ctx, epoch);
+    *slot = adce_obs_claim_counter(ctx);
+    return *slot != NULL;
 }
 
 /* =====================================================================
@@ -57,11 +66,11 @@ static int test_obs_sigma_floor(void) {
      * steady traffic drives var toward zero, so sigma collapses; without a
      * floor the next ordinary deviation would divide by ~0 and read as
      * unbounded z. This is the hair trigger after a quiet period. */
-    obs_fresh(&ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&ctx, &g_obs_epoch, &g_obs_counter));
     ADCE_TEST_ASSERT(adce_obs_claim_writer(&ctx) == 1);
 
     for (k = 1; k <= 1000; ++k) {
-        atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)10,
+        atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)10,
                               memory_order_relaxed);
         ADCE_TEST_ASSERT(adce_obs_epoch_close(
                              &ctx, (uint64_t)k * (uint64_t)ADCE_OBS_EPOCH_NS) >=
@@ -81,7 +90,7 @@ static int test_obs_sigma_floor(void) {
      * 1/T = the epsilon floor, so a floored sigma caps z at 1.0 -- well
      * below z_lo, so nothing is published as pressure. An unfloored sigma
      * would have made this enormous. */
-    atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)11,
+    atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)11,
                           memory_order_relaxed);
     ADCE_TEST_ASSERT(adce_obs_epoch_close(
                          &ctx, (uint64_t)1001 * (uint64_t)ADCE_OBS_EPOCH_NS) == 1);
@@ -108,7 +117,7 @@ static int test_obs_sigma_floor(void) {
         ctx.var = zero / zero;
         ADCE_TEST_ASSERT(isnan(ctx.var));
 
-        atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)50,
+        atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)50,
                               memory_order_relaxed);
         ADCE_TEST_ASSERT(adce_obs_epoch_close(&ctx, (uint64_t)1002 *
                                                         (uint64_t)
@@ -142,14 +151,14 @@ static int test_obs_ewma_update(void) {
     double want_var = 0.0;
     int k;
 
-    obs_fresh(&ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&ctx, &g_obs_epoch, &g_obs_counter));
     ADCE_TEST_ASSERT(adce_obs_claim_writer(&ctx) == 1);
 
     /* First epoch. The deviation is taken against the PRIOR mean, which is
      * zero, so mu_1 is exactly alpha * r. Against the updated mean it would
      * be a different number entirely, which is what makes this one assertion
      * the sharpest check that the ordering is right. */
-    atomic_store_explicit(&g_obs_counter.arrivals, n, memory_order_relaxed);
+    atomic_store_explicit(&g_obs_counter->arrivals, n, memory_order_relaxed);
     ADCE_TEST_ASSERT(adce_obs_epoch_close(&ctx, 1000) == 0);
     ADCE_TEST_ASSERT(obs_close(ctx.mu, a * r, 1e-15));
 
@@ -166,7 +175,7 @@ static int test_obs_ewma_update(void) {
     for (k = 2; k <= 60; ++k) {
         double want_d = r * decay;
 
-        atomic_store_explicit(&g_obs_counter.arrivals, n, memory_order_relaxed);
+        atomic_store_explicit(&g_obs_counter->arrivals, n, memory_order_relaxed);
         ADCE_TEST_ASSERT(adce_obs_epoch_close(&ctx, (uint64_t)k * 1000) == 0);
 
         want_var = (1.0 - a) * (want_var + a * want_d * want_d);
@@ -286,7 +295,7 @@ static int test_obs_publication_clamp(void) {
 
     /* Overshoot magnitude is recorded in the diagnostic counter, which lives
      * on the context and never enters adce_epoch_state_t. */
-    obs_fresh(&ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&ctx, &g_obs_epoch, &g_obs_counter));
     ADCE_TEST_ASSERT(ctx.clamp_events == 0);
     ADCE_TEST_ASSERT(ctx.max_overshoot_q16 == 0);
 
@@ -332,11 +341,11 @@ static int test_obs_warmup(void) {
     uint64_t observed_at_ns;
     uint64_t k;
 
-    obs_fresh(&ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&ctx, &g_obs_epoch, &g_obs_counter));
     ADCE_TEST_ASSERT(adce_obs_claim_writer(&ctx) == 1);
 
     for (k = 1; k < ADCE_OBS_WARMUP_EPOCHS; ++k) {
-        atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)10,
+        atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)10,
                               memory_order_relaxed);
         ADCE_TEST_ASSERT(adce_obs_epoch_close(&ctx, k * ADCE_OBS_EPOCH_NS) == 0);
     }
@@ -357,7 +366,7 @@ static int test_obs_warmup(void) {
                                              ADCE_OBS_EPOCH_NS) == 1);
 
     /* The N_min'th close is the first publication. */
-    atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)10,
+    atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)10,
                           memory_order_relaxed);
     ADCE_TEST_ASSERT(adce_obs_epoch_close(
                          &ctx, ADCE_OBS_WARMUP_EPOCHS * ADCE_OBS_EPOCH_NS) == 1);
@@ -407,7 +416,7 @@ static int test_obs_writer_claim(void) {
     uint64_t observed_at_ns;
     uint64_t arrivals_before;
 
-    obs_fresh(&g_claim_ctx, &g_obs_counter, &g_obs_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&g_claim_ctx, &g_obs_epoch, &g_obs_counter));
 
     /* Before any claim, even the initialising thread cannot publish. */
     ADCE_TEST_ASSERT(adce_obs_epoch_close(&g_claim_ctx, 1) == -1);
@@ -417,10 +426,10 @@ static int test_obs_writer_claim(void) {
      * invariant, not the identity. */
     ADCE_TEST_ASSERT(adce_obs_claim_writer(&g_claim_ctx) == 0);
 
-    atomic_store_explicit(&g_obs_counter.arrivals, (uint64_t)7,
+    atomic_store_explicit(&g_obs_counter->arrivals, (uint64_t)7,
                           memory_order_relaxed);
     arrivals_before =
-        atomic_load_explicit(&g_obs_counter.arrivals, memory_order_relaxed);
+        atomic_load_explicit(&g_obs_counter->arrivals, memory_order_relaxed);
 
     atomic_store_explicit(&g_claim_second_result, 99, memory_order_release);
     atomic_store_explicit(&g_claim_publish_result, 99, memory_order_release);
@@ -436,7 +445,7 @@ static int test_obs_writer_claim(void) {
     /* A refused publish must leave the arrival counter and the statistics
      * exactly as it found them, or it quietly steals an epoch's arrivals
      * from the real owner. */
-    ADCE_TEST_ASSERT(atomic_load_explicit(&g_obs_counter.arrivals,
+    ADCE_TEST_ASSERT(atomic_load_explicit(&g_obs_counter->arrivals,
                                           memory_order_relaxed) ==
                      arrivals_before);
     ADCE_TEST_ASSERT(g_claim_ctx.epochs_closed == 0);
@@ -492,7 +501,6 @@ static int test_obs_cadence(void) {
 
 #define ADCE_OBS_SEQ_EPOCHS (ADCE_OBS_WINDOW_N + 60)
 
-static adce_obs_counter_t g_det_counter;
 static adce_epoch_state_t g_det_epoch;
 
 /* A fixed sequence with a burst placed after warmup, so the run crosses the
@@ -510,7 +518,7 @@ static int obs_run_sequence(adce_q16_t *out, uint64_t *published,
     adce_obs_ctx_t ctx;
     int k;
 
-    obs_fresh(&ctx, &g_det_counter, &g_det_epoch);
+    ADCE_TEST_ASSERT(obs_fresh(&ctx, &g_det_epoch, &g_det_counter));
     ADCE_TEST_ASSERT(adce_obs_claim_writer(&ctx) == 1);
 
     *published = 0;
@@ -523,7 +531,7 @@ static int obs_run_sequence(adce_q16_t *out, uint64_t *published,
          * shipping-target gate. */
         uint64_t at_ns = (uint64_t)k * (uint64_t)ADCE_OBS_EPOCH_NS;
 
-        atomic_store_explicit(&g_det_counter.arrivals, obs_seq_arrivals(k),
+        atomic_store_explicit(&g_det_counter->arrivals, obs_seq_arrivals(k),
                               memory_order_relaxed);
 
         if (adce_obs_epoch_close(&ctx, at_ns) == 1) {
@@ -656,6 +664,127 @@ static int test_obs_tap_counter(void) {
     return 0;
 }
 
+/* The drain must visit EVERY claimed slot, and no existing assertion can see
+ * that it does. This case exists because a mutation proved the gap rather than
+ * because the property looked nice: making adce_obs_drain SKIP one slot --
+ * neither adding its arrivals nor zeroing them -- leaves
+ * `total_tapped == arrivals_closed + discarded + residual` GREEN at both of its
+ * sites, and with the skipped index chosen so that only the four-thread rig
+ * reaches it, the whole suite passes with exit 0 while one ingress thread's
+ * arrivals never reach the statistic at all.
+ *
+ * The reason is structural and is the price of the redefinition. That identity
+ * is a CONSERVATION statement: it asks whether arrivals were lost, and a
+ * skipped slot loses nothing -- the arrivals simply stay in the slot, counted
+ * by `residual` instead of by `arrivals_closed`, and both sides move together.
+ * Under the single shared counter a partial drain was not expressible; with T
+ * slots it is, so the new design opens a failure mode the old identity was
+ * never shaped to catch. Silently dropping one thread's arrivals makes pressure
+ * read LOW and the gate shed LESS, which is fail-OPEN on containment.
+ *
+ * Deterministic, single-threaded, no timing: the weights are distinct powers of
+ * ten, so the returned sum names exactly which slots were visited. */
+static int test_obs_drain_covers_claimed(void) {
+    static adce_obs_ctx_t ctx;
+    static adce_epoch_state_t epoch;
+    adce_obs_counter_t *slot[4];
+    uint64_t weight[4] = {1, 10, 100, 1000};
+    uint64_t expect = 0;
+    unsigned k = 4u;
+    unsigned i;
+    uint64_t j;
+
+    if ((unsigned)ADCE_OBS_MAX_INGRESS < k) {
+        k = (unsigned)ADCE_OBS_MAX_INGRESS;
+    }
+
+    memset(&epoch, 0, sizeof(epoch));
+    adce_obs_init(&ctx, &epoch);
+
+    /* Nothing claimed yet, so the drain runs over zero slots. */
+    ADCE_TEST_ASSERT(adce_obs_drain(&ctx) == 0);
+    ADCE_TEST_ASSERT(adce_obs_residual(&ctx) == 0);
+
+    for (i = 0; i < k; ++i) {
+        slot[i] = adce_obs_claim_counter(&ctx);
+        ADCE_TEST_ASSERT(slot[i] != NULL);
+        for (j = 0; j < weight[i]; ++j) {
+            adce_obs_tap(slot[i]);
+        }
+        expect += weight[i];
+    }
+
+    /* Read without draining first: the residual is the same sum. */
+    ADCE_TEST_ASSERT(adce_obs_residual(&ctx) == expect);
+
+    /* THE COVERAGE ASSERTION. A skipped slot subtracts its own distinct weight,
+     * so the failure names the index rather than merely reporting a mismatch. */
+    ADCE_TEST_ASSERT(adce_obs_drain(&ctx) == expect);
+
+    /* And the drain ZEROED what it counted. Counting a slot without zeroing it
+     * is the other half of the mutation -- that one the identity does catch,
+     * by double-counting -- and this pins it here too, without needing a rig. */
+    ADCE_TEST_ASSERT(adce_obs_residual(&ctx) == 0);
+    ADCE_TEST_ASSERT(adce_obs_drain(&ctx) == 0);
+
+    /* Anti-vacuity: the assertions above would all hold if adce_obs_tap were a
+     * no-op and every quantity were zero. It is not. */
+    ADCE_TEST_ASSERT(expect == 1111 || k < 4u);
+    ADCE_TEST_ASSERT(expect > 0);
+
+    /* One further tap lands in exactly one slot and is drained from it. */
+    adce_obs_tap(slot[k - 1u]);
+    ADCE_TEST_ASSERT(adce_obs_residual(&ctx) == 1);
+    ADCE_TEST_ASSERT(adce_obs_drain(&ctx) == 1);
+
+    return 0;
+}
+
+/* The registry fills, and a full registry returns NULL. The contract this pins
+ * is that a caller which cannot obtain a counter MUST NOT run that ingress
+ * thread: there is no fallback to a shared counter, because a fallback would be
+ * arithmetically correct and would silently reintroduce the contention this
+ * design removed, under load, at the moment it costs most.
+ *
+ * Two properties, and the second is what stops the first being vacuous: the
+ * first ADCE_OBS_MAX_INGRESS claims all succeed and are all DISTINCT -- a claim
+ * that handed the same slot to two threads would satisfy "non-NULL" while
+ * recreating true sharing on that line -- and every claim past capacity returns
+ * NULL, repeatedly, rather than only the first one. */
+static int test_obs_claim_capacity(void) {
+    static adce_obs_ctx_t ctx;
+    static adce_epoch_state_t epoch;
+    static adce_obs_counter_t *seen[ADCE_OBS_MAX_INGRESS];
+    unsigned i;
+    unsigned j;
+
+    memset(&epoch, 0, sizeof(epoch));
+    adce_obs_init(&ctx, &epoch);
+
+    for (i = 0; i < (unsigned)ADCE_OBS_MAX_INGRESS; ++i) {
+        seen[i] = adce_obs_claim_counter(&ctx);
+        ADCE_TEST_ASSERT(seen[i] != NULL);
+        for (j = 0; j < i; ++j) {
+            ADCE_TEST_ASSERT(seen[i] != seen[j]);
+        }
+    }
+
+    /* Past capacity. Checked three times: a claim that refuses once and then
+     * hands out a slot again would pass a single check. */
+    ADCE_TEST_ASSERT(adce_obs_claim_counter(&ctx) == NULL);
+    ADCE_TEST_ASSERT(adce_obs_claim_counter(&ctx) == NULL);
+    ADCE_TEST_ASSERT(adce_obs_claim_counter(&ctx) == NULL);
+
+    /* A refused claim must not have inflated the drain's upper bound: the CAS
+     * loop leaves `claimed` at capacity exactly, so the drain still visits
+     * ADCE_OBS_MAX_INGRESS slots and not more. Driven through a real tap on the
+     * last slot so the count is observed rather than assumed. */
+    adce_obs_tap(seen[ADCE_OBS_MAX_INGRESS - 1]);
+    ADCE_TEST_ASSERT(adce_obs_drain(&ctx) == 1);
+
+    return 0;
+}
+
 /* =====================================================================
  * External forwarders. The cases above are static so the gate's ran-tests
  * guard can find them by source pattern; the runner table lives in
@@ -676,3 +805,5 @@ ADCE_OBS_TEST_EXPORT(obs_writer_claim)
 ADCE_OBS_TEST_EXPORT(obs_cadence)
 ADCE_OBS_TEST_EXPORT(obs_determinism)
 ADCE_OBS_TEST_EXPORT(obs_tap_counter)
+ADCE_OBS_TEST_EXPORT(obs_drain_covers_claimed)
+ADCE_OBS_TEST_EXPORT(obs_claim_capacity)

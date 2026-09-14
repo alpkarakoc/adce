@@ -449,10 +449,60 @@ jobs:
         run: |
           cc -std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow \
              -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic \
-             -Iinclude -o /tmp/tapbench bench/tap_contention.c -lpthread -lm
+             -Iinclude -o /tmp/tapbench bench/tap_contention.c \
+             src/adce_observe.c -lpthread -lm
 
       - name: Measure
         run: /tmp/tapbench 2000000 5
+
+  # ===========================================================================
+  # THE CADENCE-PERTURBATION MEASUREMENT. Pre-registered in
+  # bench/drain_cadence.c, which was committed with no numbers in it before
+  # this job existed; `git log` on that path is the proof of order.
+  #
+  # Same shape and same reasoning as tap-contention above. It ASSERTS NOTHING,
+  # it is not in verify.sh because each arm costs seconds of real wall time at
+  # the shipped 10 ms cadence, and it is not required by the ruleset.
+  #
+  # WHY IT NEEDS BOTH RUNNERS AND NOT JUST THE LAPTOP. The quantity is the
+  # jitter of a sleeping thread's wakeup, which is a property of the
+  # SCHEDULER. CLAUDE.md records that the development machine's effective
+  # concurrency is not known -- macOS migrates threads between performance and
+  # efficiency clusters by QoS and this project sets none -- so laptop jitter
+  # is the one thing a laptop is worst at measuring. A 4 vCPU runner with a
+  # uniform core type is the better instrument here, which is the reverse of
+  # the usual ranking and is the reason this job matters more than most.
+  #
+  # Shorter than the local sweep: 200 intervals per arm and 3 runs against the
+  # local 300 and 20. At 10 ms an interval that is 2 seconds per arm-run.
+  # ===========================================================================
+  drain-cadence:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Toolchain and machine
+        run: |
+          uname -srm
+          echo "nproc: $(nproc)"
+          cc --version | head -1
+
+      - name: Build under the strict profile's flags
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -Wconversion -Wshadow \
+             -Wcast-align -Wstrict-prototypes -Wpointer-arith -Wvla -pedantic \
+             -Iinclude -o /tmp/cadbench bench/drain_cadence.c \
+             src/adce_observe.c src/adce_obs_thread.c -lpthread -lm
+
+      - name: Measure
+        run: /tmp/cadbench 200 3
 
   # ===========================================================================
   # THE SEQLOCK RETRY MEASUREMENT. Entry (4) of CLAUDE.md's unverified list.

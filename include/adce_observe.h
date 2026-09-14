@@ -157,6 +157,33 @@ _Static_assert(sizeof(adce_obs_counter_t) == ADCE_CACHELINE,
 _Static_assert(_Alignof(adce_obs_counter_t) == ADCE_CACHELINE,
                "adce_obs_counter_t must be cache-line aligned");
 
+/* How many ingress threads may claim a counter.
+ *
+ * THIS IS A DEPLOYMENT PARAMETER, NOT A DERIVED BOUND, and saying so is the
+ * point. Nothing in this design computes 64; it is a capacity chosen to be
+ * larger than any ingress pool this library has been pointed at, and a
+ * deployment with more threads must raise it. Contrast ADCE_OBS_WINDOW_N,
+ * whose ceiling of 125 IS derived and is pinned by an assert that recomputes
+ * it -- there the number follows from sup z and z_hi, here it follows from
+ * nobody's arithmetic.
+ *
+ * It costs SPACE and never TIME: the drain iterates CLAIMED slots, so a
+ * four-thread deployment pays four exchanges per epoch whatever this is set
+ * to. The cost of raising it is ADCE_CACHELINE bytes per slot inside
+ * adce_obs_ctx_t -- 8 KiB at 64 on a 128-byte line.
+ *
+ * The range assert is a sanity bound and is likewise underived: zero slots
+ * would make the plane unusable, and the upper limit exists so a typo cannot
+ * silently demand a megabyte of context. */
+#ifndef ADCE_OBS_MAX_INGRESS
+#define ADCE_OBS_MAX_INGRESS 64
+#endif
+
+_Static_assert(ADCE_OBS_MAX_INGRESS >= 1 && ADCE_OBS_MAX_INGRESS <= 4096,
+               "ADCE_OBS_MAX_INGRESS must be in [1, 4096]: zero slots leave "
+               "no ingress thread able to tap, and the upper bound stops a "
+               "typo from demanding a megabyte of adce_obs_ctx_t");
+
 /* The whole tap. Runs per arrival on the ingress thread, strictly before the
  * enforcement gate, and counts arrivals the gate is about to drop -- tapping
  * after the gate would close a feedback loop in which the detector measures
@@ -256,7 +283,23 @@ typedef struct {
     uint64_t clamp_events;
     adce_q16_t max_overshoot_q16;
 
-    adce_obs_counter_t *counter;
+    /* One counter per ingress thread, owned by the context rather than by the
+     * caller. Caller-owned counters were the obvious mirror of adce_enf_ctx_t
+     * and were rejected on LIFETIME: a thread that exits leaves the registry
+     * pointing at storage that may be gone, so its undrained arrivals are
+     * either lost or read after free, and no API can stop a caller putting one
+     * on its stack. A slot outlives the thread that claimed it.
+     *
+     * Sized by ADCE_OBS_MAX_INGRESS, iterated to `claimed`. */
+    adce_obs_counter_t slots[ADCE_OBS_MAX_INGRESS];
+
+    /* Slots handed out so far, and therefore the drain's upper bound. Atomic
+     * because ingress threads claim concurrently at startup; the observer
+     * reads it once per epoch. Never decremented -- a slot is not returned
+     * when a thread exits, because its residual arrivals still have to be
+     * drained and the identity still has to account for them. */
+    _Atomic unsigned claimed;
+
     adce_epoch_state_t *epoch;
 
     /* Single-writer ownership, enforced rather than assumed. A second
@@ -268,11 +311,58 @@ typedef struct {
     int owner_valid;
 } adce_obs_ctx_t;
 
-/* Prepares the context and zeroes the counter. Does not claim the writer:
+/* Prepares the context and zeroes every slot. Does not claim the writer:
  * claiming records the calling thread as the owner, and init may legitimately
- * run on a different thread from the observer loop. */
-void adce_obs_init(adce_obs_ctx_t *ctx, adce_obs_counter_t *counter,
-                   adce_epoch_state_t *epoch);
+ * run on a different thread from the observer loop.
+ *
+ * The counter parameter is GONE. This is a clean break with no compatibility
+ * shim, and the shim is what was rejected rather than overlooked: keeping the
+ * old form working would let a consumer add ingress threads without claiming,
+ * inherit the shared-counter contention defect, and discover it only under
+ * load. That is the same silent degradation ruled out for the full-registry
+ * fallback below, one layer up. */
+void adce_obs_init(adce_obs_ctx_t *ctx, adce_epoch_state_t *epoch);
+
+/* ADCE_PUBLIC_NO_INTERNAL_USER: an ingress thread claims its own counter, and
+ * ingress is the consumer's code -- the library is this counter's reader and
+ * never its writer, exactly as with adce_obs_tap. Zero internal callers is the
+ * design working.
+ *
+ * Called ONCE per ingress thread, at thread start, never on the arrival path.
+ * Returns a pointer to that thread's slot, or NULL when every slot is taken.
+ *
+ * NULL IS FAIL-CLOSED AND THE CONTRACT IS BINDING: a caller that cannot obtain
+ * a counter MUST NOT run that ingress thread. There is deliberately no
+ * fallback to a shared counter. A fallback would be correct arithmetically and
+ * silently reintroduce the contention this change exists to remove, under
+ * load, at the moment it costs most. Nor may the thread simply skip tapping:
+ * arrivals invisible to the detector make pressure read LOW, so the gate sheds
+ * LESS -- fail-open on the containment axis, which is the one direction this
+ * plane may never fail. Refusing to start the thread is the only reading of
+ * "closed" that holds. This mirrors adce_obs_claim_writer, where a second
+ * claimant is a startup failure rather than a runtime corruption. */
+adce_obs_counter_t *adce_obs_claim_counter(adce_obs_ctx_t *ctx);
+
+/* Snapshot-and-reset EVERY CLAIMED SLOT, returning their sum. O(claimed) and
+ * not O(ADCE_OBS_MAX_INGRESS), so the capacity constant costs space and never
+ * time. Called by the observer thread, off the arrival path.
+ *
+ * NO ARRIVAL IS LOST, and the argument is per slot rather than global: a slot
+ * is incremented only by its owner and zeroed only here, so every increment is
+ * observed exactly once. What the T exchanges give up is the epoch boundary
+ * being a single INSTANT -- an arrival landing between the first exchange and
+ * the last is attributed to the NEXT epoch, never dropped. */
+uint64_t adce_obs_drain(adce_obs_ctx_t *ctx);
+
+/* ADCE_PUBLIC_NO_INTERNAL_USER: the residual term of the overrun identity,
+ * which only a test evaluates -- the library never needs to read the counters
+ * without draining them.
+ *
+ * Sum over claimed slots WITHOUT zeroing. This is the redefinition of
+ * `residual` in `total_tapped == arrivals_closed + discarded + residual`: it
+ * was one atomic load and is now a sum, and that is the one assertion whose
+ * SHAPE changes under this design. */
+uint64_t adce_obs_residual(const adce_obs_ctx_t *ctx);
 
 /* CAS 0 -> 1 on the claim flag, recording the calling thread as owner.
  * Returns 1 to the winner and 0 to every later claimant. */

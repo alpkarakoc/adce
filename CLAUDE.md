@@ -36,7 +36,8 @@ looking.
   `adce_obs_epoch_close`, written as `!(sigma >= EPS)` so one comparison covers NaN,
   negative and zero.
 - `src/adce_observe.c` — Observation Plane producer, off the arrival path: `adce_obs_init`,
-  `adce_obs_claim_writer`, `adce_obs_epoch_close`.
+  `adce_obs_claim_writer`, `adce_obs_claim_counter`, `adce_obs_drain`,
+  `adce_obs_residual`, `adce_obs_epoch_close`.
 - `test/t_adce_platform.c` — owns `main()` and the single runner table. `t_*` unit tests:
   Q16.16 arithmetic (including overflow), token-bucket clamping, RNG sanity, time
   monotonicity, single-threaded seqlock, and a two-thread stress test.
@@ -1417,9 +1418,11 @@ looking.
   term is comparable to or larger than the entire sum §4 published, at every T >= 2 on every
   host measured.
 
-- **DESIGN CONSEQUENCE, PROPOSED AND NOT IMPLEMENTED: the Ingest Plane's single shared
-  counter is a scaling defect, and the Enforcement Plane already took the opposite decision
-  on the same question.** The evidence is the entry above; nothing here is built.
+- **DESIGN CONSEQUENCE, NOW IMPLEMENTED: the Ingest Plane's single shared counter was a
+  scaling defect, and the Enforcement Plane had already taken the opposite decision on the
+  same question.** The evidence is the entry above. The proposal below is kept in the shape
+  it was proposed in, with the outcome recorded beneath it, so that what was predicted can
+  be read against what happened.
 
   **The measurement, restated as the design claim it supports.** Aggregate tap throughput on
   `ubuntu-24.04` x86_64, median over 5 runs per cell, M arrivals/s over all threads:
@@ -1484,10 +1487,263 @@ looking.
      one, and whether the harness's tap-before-gate assertions still read the same counter.
      None of those is hard; none of them is decided.
 
-  **It becomes item one after the three-pull-request window closes.** Recorded now because
-  the evidence that motivates it is fresh and adjacent, and a design consequence discovered
-  during a measurement is exactly the thing that evaporates if it is not written down at the
-  moment it is found.
+  **LANDED.** The stopping-rule window closed with #36, and this was item one as recorded.
+  The context now owns `adce_obs_counter_t slots[ADCE_OBS_MAX_INGRESS]`; an ingress thread
+  calls `adce_obs_claim_counter` once at start and taps through the returned pointer.
+  `adce_obs_tap` KEPT ITS SIGNATURE, so the per-arrival path is the same relaxed
+  `fetch_add` on the same padded type, now on a line nobody else writes.
+
+  **The four questions the proposal listed as undecided, answered.**
+
+  *How a consumer registers a thread's counter*: it does not register one, it CLAIMS one.
+  The alternative — the caller owns the counter and hands it in, mirroring
+  `adce_enf_ctx_t` — was rejected on LIFETIME, which is the axis the two planes actually
+  differ on. An enforcement bucket dies with its thread and nothing needs it afterwards; an
+  ingress thread's undrained arrivals still have to be accounted for after it exits. A
+  caller-owned counter would leave the registry pointing at storage that may be gone, and
+  no API can stop a caller putting one on its stack. A library-owned slot outlives the
+  thread that claimed it.
+
+  *What happens when threads outnumber a fixed array*: `adce_obs_claim_counter` returns
+  NULL and the caller MUST NOT run that ingress thread. No fallback to a shared counter —
+  that would be arithmetically correct and would silently restore the contention the change
+  removes, under load, at the moment it costs most. Nor may the thread skip tapping:
+  arrivals invisible to the detector make pressure read LOW and the gate shed LESS, which
+  is fail-OPEN on the one axis this plane may never fail open on.
+
+  *Whether the overrun identity survives T drains*: it does, and it is the ONE ASSERTION
+  WHOSE SHAPE CHANGED. `residual` in `total_tapped == arrivals_closed + discarded +
+  residual` was a single atomic load and is now a sum over claimed slots. Exact, because
+  each arrival increments exactly one slot and each slot is drained into exactly one
+  accumulator. What the T exchanges give up is the epoch boundary being a single INSTANT —
+  an arrival landing between the first exchange and the last is attributed to the NEXT
+  epoch, never dropped.
+
+  *Whether the harness's tap-before-gate assertions still read the same counter*: they do
+  not, and they must not. Each ingress thread claims its own slot; the assertions read the
+  sum.
+
+  **`ADCE_OBS_MAX_INGRESS` IS A DEPLOYMENT PARAMETER, NOT A DERIVED BOUND.** Nothing
+  computes 64. It is a capacity chosen to exceed any ingress pool this library has been
+  pointed at, and a deployment with more threads must raise it. The contrast that makes the
+  distinction concrete is `ADCE_OBS_WINDOW_N`, whose ceiling of 125 IS derived — from
+  `sup z` and `z_hi` — and is pinned by an assert that RECOMPUTES it. This one follows from
+  nobody's arithmetic, and the range assert guarding it is likewise a sanity bound rather
+  than a derivation. Dressing it as derived would be the error this document records
+  against the `0.067` repeat count: a number with no basis presented as though it had one.
+
+  It costs SPACE and never TIME, because the drain iterates CLAIMED slots. At 64 on a
+  128-byte line `sizeof(adce_obs_ctx_t)` is 8448 bytes.
+
+  **THE ACCEPTANCE TARGET WAS PRE-REGISTERED AND WAS MET.** The target was the PRIVATE arm
+  of `bench/tap_contention.c` — 1.74 / 1.77 / 1.93 / 2.13 ns at T = 1/2/4/8 on the
+  development host. A third arm, SLOTS, taps through a real `adce_obs_ctx_t`. Median ns per
+  arrival, 10 runs, n per cell is runs x T:
+
+  | arm | T=1 | T=2 | T=4 | T=8 |
+  |---|---|---|---|---|
+  | shared (overturned) | 1.78 | 6.55 | 19.65 | 123.89 |
+  | private (control) | 1.82 | 1.80 | 1.93 | 2.17 |
+  | **SLOTS (shipped)** | **1.79** | **1.81** | **1.93** | **2.20** |
+  | target | 1.74 | 1.77 | 1.93 | 2.13 |
+
+  Within 3% of target at every T, and within the control's own spread — the PRIVATE arm
+  re-measured today reads 1.82 against its own 1.74 from #33, a larger gap than the one
+  between PRIVATE and SLOTS. Library ownership of the slots costs nothing measurable.
+  Aggregate throughput went from 562 → 62 M arrivals/s across T = 1 → 8 to 558 → 3236.
+
+  **BOTH CI ARCHITECTURES, and the target does NOT transfer to them as an absolute.** The
+  1.74/1.77/1.93/2.13 figures are development-host numbers, and the CI hosts are slower at
+  this operation by their own control arm: PRIVATE reads 3.03 ns at T=1 on x86_64 CI and
+  4.18 on arm64 CI. Comparing SLOTS against a dev-host absolute would therefore report a
+  "gap" that is the machine. The comparison that IS valid is SLOTS against the PRIVATE
+  control measured in the same run on the same host, which is what the third arm exists for.
+  2,000,000 arrivals per thread, 5 runs, n per cell is runs x T:
+
+  | host | arm | T=1 | T=2 | T=4 | T=8 |
+  |---|---|---|---|---|---|
+  | `ubuntu-24.04` x86_64, 4 vCPU | shared | 2.99 | 25.35 | 56.03 | 105.60 |
+  | | private | 3.03 | 2.99 | 2.43 | 2.81 |
+  | | **SLOTS** | **3.01** | **2.99** | **2.33** | **3.27** |
+  | | SLOTS/private | 0.99x | 1.00x | 0.96x | **1.16x** |
+  | `ubuntu-24.04-arm` aarch64, 4 vCPU | shared | 4.17 | 13.58 | 27.18 | 53.73 |
+  | | private | 4.18 | 4.17 | 4.19 | 5.67 |
+  | | **SLOTS** | **4.17** | **4.16** | **4.17** | **6.99** |
+  | | SLOTS/private | 1.00x | 1.00x | 1.00x | **1.23x** |
+
+  At T = 1, 2 and 4 the shipped arm is indistinguishable from the control on both hosts.
+  **At T = 8 it is not, and that is reported rather than absorbed:** 1.16x on x86_64 and
+  1.23x on arm64. Both runners are 4 vCPU, so T = 8 is oversubscribed two to one, and the
+  MINIMA in those cells are identical between the arms — 2.31 against 2.31 on x86_64, 4.17
+  against 4.16 on arm64 — which places the difference in the outliers rather than in a
+  per-tap cost. That is an observation about where the difference lives, NOT an
+  attribution: nothing here separates "SLOTS is descheduled slightly more often" from "the
+  contiguous slots interact with the runner's cache differently under oversubscription",
+  and with n = 40 per cell and one run of the job, it should not be quoted as a rate. The
+  aggregate numbers show the change working regardless — x86_64 goes from 334 → 68 M
+  arrivals/s across T = 1 → 8 on the shared arm to 332 → 1592 on SLOTS, and arm64 from
+  240 → 134 to 240 → 872.
+
+  **The cadence prediction holds on both CI hosts more cleanly than on the laptop**, which
+  is what the job's own comment predicted for the reason it gave: the quantity is a
+  sleeping thread's wakeup jitter, and a uniform-core runner is the better instrument than
+  a machine whose effective concurrency this document records as not known. 200 intervals
+  per arm-run, 3 runs. Every median is within about 90 ns of the nominal 10 ms at every
+  slot count on both hosts, and `late` is zero everywhere except a single 4-slot run on
+  x86_64. On arm64 the 64-slot arm has the SMALLEST tail of any arm — max 10,009,864 ns
+  against the 1-slot arm's 10,084,576.
+
+  **What is still not settled is what #33 already said was not settled**, and landing the
+  fix does not close it: the benchmark loop does nothing but tap, so it is the worst case
+  for line migration, and a real ingress site interleaves the gate, the clock and request
+  work. The SIGN was never in doubt and is now acted on; the MAGNITUDE at a realistic duty
+  cycle remains untested.
+
+- **THE SUMMED IDENTITY IS BLIND TO A SKIPPED SLOT, AND A WHOLE INGRESS THREAD CAN GO
+  UNCOUNTED WITH THE SUITE GREEN.** Found by mutation while proving the redefinition above,
+  and it is a property of the new design rather than of the code that implements it.
+
+  `total_tapped == arrivals_closed + discarded + residual` is a CONSERVATION statement: it
+  asks whether arrivals were lost. A drain that skips a slot loses nothing — the arrivals
+  stay in the slot and simply move from `arrivals_closed` to `residual`, both sides
+  together — so the identity holds exactly while one thread's arrivals never reach the
+  statistic at all. Measured, not argued:
+
+  | mutation to `adce_obs_drain` | identity sites fired | suite |
+  |---|---|---|
+  | counts slot 0 but does NOT zero it | **2 of 2** | RED |
+  | SKIPS slot 0 entirely | 0 of 2 | red, unrelated cases |
+  | SKIPS slot 3 (only the 4-thread rig reaches it) | 0 of 2 | **GREEN, exit 0** |
+
+  The mandated mutation goes red at both sites, so the sum does the work the single load
+  did. The third row is the finding: with the index chosen so that no single-slot test
+  covers it, the ENTIRE SUITE passed while a quarter of the ingress went uncounted. That
+  direction is fail-OPEN — fewer arrivals seen means lower pressure means less shedding.
+
+  **THE GAP IS NOT NEW. ITS FAILURE MODE IS, AND THAT IS THE WHOLE FINDING.** Two readings
+  are available and both are wrong. "This change introduced the gap" is wrong: the identity
+  was conservation-only before, and a drain that did not drain would have satisfied it then
+  too. "The gap pre-existed, so nothing changed" is wrong in the more dangerous direction.
+
+  What changed is DETECTABILITY. With one shared counter, skipping the drain meant skipping
+  the ONLY drain: `arrivals_closed` stays at zero, observed throughput falls to zero, the
+  detector sees nothing at all, and the failure is LOUD — several cases fire and no
+  deployment could run that way for a second. With T slots, skipping one leaves seven
+  eighths of the ingress flowing. The statistic still moves, pressure still tracks, epochs
+  still publish, and the suite still exits 0. **The defect went from impossible to miss to
+  impossible to see, and the redesign changed that without touching a line of the
+  assertion.**
+
+  **The axis is the one R4 named, and it is the same axis in both places.** A thread whose
+  arrivals are never drained is a thread the detector does not count. The measured rate
+  reads low, so `d` reads low, so pressure reads low, so `adce_enf_should_shed` sheds LESS
+  — fail-OPEN on the containment axis, which is the single direction this plane may never
+  fail. R4 reached that conclusion for a thread that cannot CLAIM a counter and must
+  therefore not run; this reaches it for a thread that claimed one and is silently not
+  drained. Same undercount, same sign, same consequence; the difference is only that the
+  first is refused at startup and the second is invisible at runtime. That is why the
+  refusal in `adce_obs_claim_counter` is not enough on its own and the drain needed a gate
+  of its own.
+
+  **M4 — THE NEW CASES TESTED IN THE OVER-DIRECTION, so they do not repeat at a finer grain
+  the one-sidedness they were written to fix.** An assertion that catches only undercounting
+  would be the same defect one level down.
+
+  | mutation | suite | cases that fire |
+  |---|---|---|
+  | (i-a) a slot DRAINED twice — `take()` called twice | GREEN | none — **and correctly so, see below** |
+  | (i-b) a slot COUNTED twice — load, then take | RED | **6**: both new cases, both identity sites, `obs_ewma_update`, `obs_sigma_floor` |
+  | (ii) claim hands the SAME slot to two threads | RED | **1**: `obs_claim_capacity` alone |
+
+  **(i) and (ii) ARE DIFFERENT MUTATIONS, and the answer decides whether one case would
+  have sufficed. It would not.** They sit in different functions — the drain and the claim —
+  and they break different properties. (i-b) is an ARITHMETIC defect and the identity is
+  fully two-sided against it: double-counting inflates the drained total against an
+  unchanged residual, so conservation breaks immediately and six cases fire. (ii) is an
+  EXCLUSIVITY defect and is arithmetically INVISIBLE — two threads sharing a slot still
+  increment atomically, no arrival is lost, and every conservation statement in the suite
+  stays exactly true. What it destroys is the thing the change exists for: the two threads
+  are back on one cache line, which is true sharing restored under a green suite. Exactly
+  one assertion in the repository catches it, the pairwise pointer-distinctness check in
+  `obs_claim_capacity`, and that is why the check is written as distinctness rather than as
+  a non-NULL test.
+
+  **Why (i-a) going green is inertness and not a blind spot, checked rather than reasoned.**
+  `adce_obs_counter_take` is an atomic EXCHANGE, so a second take on the same slot returns
+  zero: "drained twice" and "counted twice" are not the same event, and only the second is a
+  defect. Run directly — 100 taps, then `take` returns 100 and the second `take` returns 0.
+  A doubled drain adds nothing, so there is nothing for a case to catch, and a red here
+  would have meant a case asserting over a quantity the design does not produce. Recorded
+  because a green run is normally weak evidence, and the only thing that makes it strong
+  here is the separate demonstration that the mutation is a no-op.
+
+  **CLOSED BY BRANCH 3, not by a note.** `obs_drain_covers_claimed` claims four slots and
+  taps them with distinct powers of ten, so the drained sum NAMES which slots were visited;
+  it then asserts the residual is zero, so the drain zeroed what it counted. Deterministic,
+  single-threaded, no timing. `obs_claim_capacity` asserts that all
+  `ADCE_OBS_MAX_INGRESS` claims succeed and are pairwise DISTINCT — a claim handing the
+  same slot to two threads satisfies "non-NULL" while recreating true sharing on that line
+  — and that three further claims each return NULL. Both run in all three `verify.sh`
+  profiles.
+
+  **P3 IS UNENFORCED AND CANNOT BE ENFORCED BY THIS SUITE, stated rather than assumed.**
+  Mutating the drain to iterate `ADCE_OBS_MAX_INGRESS` instead of `claimed` leaves every
+  test green, because draining unclaimed slots adds zero. That the drain is O(claimed) is a
+  COST property, and no assertion over answers can see a cost. It is maintained by the code
+  reading `claimed` and by nothing else.
+
+- **THE CADENCE PREDICTION HELD, AND THE PROTOCOL THAT TESTED IT HAD A CONFOUND ITS AUTHOR
+  DID NOT ANTICIPATE.** `bench/drain_cadence.c`, pre-registered numbers-free before any
+  measurement; `git log` on that path is the proof of order.
+
+  The question: closing an epoch now costs one exchange per claimed slot instead of one
+  total. The prediction: no perturbation resolvable, on a standing bound of 39 ns for 64
+  uncontended exchanges against a 10 ms epoch — a duty cycle near 4e-6. Registered
+  refutation criteria were the median interval rising with the slot count beyond the
+  within-arm spread, `late` rising with it, or the tail widening with it.
+
+  300 intervals per arm-run, 20 runs per arm, development host:
+
+  | slots | median of medians (ns) | within-arm spread | p99 median | late |
+  |---|---|---|---|---|
+  | 1 | 10,000,625 | 5,875 | 10,035,958 | 6 |
+  | 4 | 10,000,542 | 20,583 | 10,038,688 | 13 |
+  | 16 | 10,000,417 | 1,376 | 10,034,188 | 6 |
+  | 64 | 10,000,334 | 959 | 10,033,479 | 8 |
+
+  The across-arm span of medians is **291 ns** over both orderings against a within-arm
+  spread reaching 26 us. Medians do not rise with the slot count; 64 slots has the tightest
+  spread and the lowest p99. No criterion refuted.
+
+  **The instructive part is the trend that was not there.** At 5 runs per arm `late` read
+  **0 / 3 / 3 / 6** across slot counts 1 / 4 / 16 / 64 — monotone, and one of the three
+  registered refutation criteria. Two objections were available and only one of them is
+  worth anything.
+
+  The weaker is magnitude: `ADCE_OBS_THREAD_LATE_NS` is 1 ms and the drain's bound is 39 ns,
+  four orders too small to make an epoch late. That reasoning is correct and it is exactly
+  what this document elsewhere calls explaining a number away rather than testing it.
+
+  The decisive one is a CONFOUND IN THE PROTOCOL: the arms run in BLOCKS, so slot count is
+  perfectly confounded with wall-clock position, and the late events sat in the blocks that
+  ran last. The discriminating experiment cost one `sed` and eight minutes — a scratch
+  build with the arm order REVERSED, run alongside the original at 20 runs per arm:
+
+  | order | late by slot count 1 / 4 / 16 / 64 |
+  |---|---|
+  | forward (1, 4, 16, 64) | 6 / 13 / 6 / 8 |
+  | reversed (64, 16, 4, 1) | 6 / 14 / 4 / 3 |
+
+  The monotone trend does not survive n = 20 in either order; reversed, the 64-slot arm has
+  HALF the late epochs of the 1-slot arm. **This document carries five entries about one
+  observation quoted as a rate, and 0/3/3/6 was very nearly the sixth.** What survives
+  unexplained is that the 4-slot arm is worst in BOTH orderings, which is neither a
+  slot-count nor a position effect; it is recorded with its n and not fitted to a story.
+
+  The reversed-order control is deliberately NOT committed. The confound is a defect in the
+  protocol's design and belongs in its record as one, rather than being quietly removed by
+  interleaving the arms after the fact and leaving no trace that the first reading was
+  wrong.
 
 - **THE ENTROPY SYSCALL, EXECUTED AND GATED. The deliverable is a CONTROL, not a
   measurement, and the entry it retires was wrong about its own gap.** Entry (3) of the
@@ -1733,6 +1989,16 @@ looking.
      which it cannot see. Same shape as the `include/` hole repaired in #29 — a selector
      written from where the code was assumed to live — and found the same way, by adding code
      somewhere its author had not considered.
+
+     **STILL OPEN, and now with a second instance.** The per-thread-counter pull request adds
+     `bench/drain_cadence.c` and a third arm to `bench/tap_contention.c`, both invisible to
+     the selector for the same reason. That pull request fires the job anyway, because it
+     changes `src/` and `include/` and `test/` as well — which is the part worth noticing:
+     the hole is not that `bench/` changes go unnoticed in general, it is that a pull request
+     touching ONLY `bench/` would take the quiet branch, and this one gives no evidence
+     either way. It remains filed rather than repaired because the repair is a gate change
+     and belongs in its own pull request with its own mutation proof, per the rule that a new
+     gate's first duty is to be shown failing on a change it must catch.
   3. **A commit on `main` was attempted, for the second time from the same root cause.** The
      session-start status line said the branch was `evidence-tap-contention`; by the time the
      write happened that branch had been merged and squashed, and the working branch was
@@ -1819,6 +2085,27 @@ looking.
      the observation and lists splicing as the leading explanation rather than the finding.
 
      NOT FIXED: this is an evidence pull request and the wording is apparatus.
+
+  6. **`ADCE_PUBLIC_NO_INTERNAL_USER` IS AN ANNOTATION NOTHING READS.** The
+     per-thread-counter change annotates `adce_obs_claim_counter` and `adce_obs_residual`
+     with it, as a DECISION rather than as a red silenced after the fact — and it could not
+     have been the latter, because there is no red to silence: the `internal-use` check is
+     **PR #26, still open**, and no job in `.github/workflows/verify.yml` matches the string.
+
+     Recorded because the annotation LOOKS like it is doing something. A reader meeting it in
+     a header would reasonably infer a check behind it, and the whole content of this
+     document's five-gate table is that a control which appears to act and does not is the
+     failure mode this project ranks worst. This one is a step further out: not a gate that
+     passes without checking, but a marker with no gate at all.
+
+     The decision it records stands on its own merits and is stated in the commit rather than
+     delegated to a checker: claiming a counter is the consumer's act exactly as tapping is,
+     so the library reading these counters and never writing them means zero internal callers
+     is the design working. What is not true is that anything enforces the annotation's
+     spelling, placement, or continued accuracy.
+
+     NOT FIXED: merging or closing #26 is a gate decision and belongs in its own pull
+     request.
 
 - **`adce_seqlock_read_retry` NOW REJECTS AN ODD START, and the defect class is the INVERSE
   of the `adce_epoch_is_stale` one.** Approved as option 1 of four and implemented; the three

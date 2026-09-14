@@ -205,7 +205,7 @@ _Static_assert(LOOP_EPOCHS >= ADCE_OBS_WARMUP_EPOCHS + LOOP_WINDOW,
                "or the window samples epochs that never published");
 
 typedef struct {
-    adce_obs_counter_t counter;
+    adce_obs_counter_t *counter;
     adce_epoch_state_t epoch;
     adce_obs_ctx_t obs;
     adce_enf_ctx_t enf;
@@ -269,7 +269,7 @@ static uint32_t loop_arrivals(uint32_t k) {
 static void loop_ingress_correct(loop_rig_t *rig, uint64_t now_ns) {
     adce_enf_outcome_t v;
 
-    adce_obs_tap(&rig->counter);
+    adce_obs_tap(rig->counter);
     rig->tapped++;
 
     v = adce_enf_decide(&rig->enf, now_ns, loop_draw_next(&rig->draws));
@@ -294,7 +294,7 @@ static void loop_ingress_inverted(loop_rig_t *rig, uint64_t now_ns) {
         return;
     }
 
-    adce_obs_tap(&rig->counter);
+    adce_obs_tap(rig->counter);
     rig->tapped++;
     rig->work++;
 }
@@ -316,7 +316,11 @@ static int loop_run(loop_rig_t *rig, uint64_t seed,
     memset(rig, 0, sizeof(*rig));
     rig->draws.s = seed;
 
-    adce_obs_init(&rig->obs, &rig->counter, &rig->epoch);
+    adce_obs_init(&rig->obs, &rig->epoch);
+    rig->counter = adce_obs_claim_counter(&rig->obs);
+    if (rig->counter == NULL) {
+        return 1;
+    }
     if (!adce_obs_claim_writer(&rig->obs)) {
         return 1;
     }
@@ -1017,7 +1021,7 @@ static const loop_ramp_cfg_t loop_ramp_above = {"g=0.20", 0.20, 1000000u,
  * comparison against the section 2B closed form, which shares no code with
  * either. */
 static int loop_ramp_run(const loop_ramp_cfg_t *cfg, loop_ramp_out_t *out) {
-    static adce_obs_counter_t counter;
+    adce_obs_counter_t *counter;
     static adce_epoch_state_t epoch;
     static adce_obs_ctx_t obs;
     double mu = 0.0;
@@ -1029,9 +1033,12 @@ static int loop_ramp_run(const loop_ramp_cfg_t *cfg, loop_ramp_out_t *out) {
     }
 
     memset(out, 0, sizeof(*out));
-    memset(&counter, 0, sizeof(counter));
     memset(&epoch, 0, sizeof(epoch));
-    adce_obs_init(&obs, &counter, &epoch);
+    adce_obs_init(&obs, &epoch);
+    counter = adce_obs_claim_counter(&obs);
+    if (counter == NULL) {
+        return 1;
+    }
     if (!adce_obs_claim_writer(&obs)) {
         return 1;
     }
@@ -1051,7 +1058,7 @@ static int loop_ramp_run(const loop_ramp_cfg_t *cfg, loop_ramp_out_t *out) {
         }
         n = (uint64_t)(x + 0.5);
 
-        loop_ramp_counter_set(&counter, n);
+        loop_ramp_counter_set(counter, n);
         if (adce_obs_epoch_close(&obs, (uint64_t)(k + 1u) *
                                            ADCE_OBS_EPOCH_NS) < 0) {
             return 3;
