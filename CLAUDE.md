@@ -858,13 +858,36 @@ looking.
   full ingress site end to end is the successor question, and it is a smaller one — the
   direction, the mechanism and the order of magnitude are no longer in doubt.
 
-  **(2) The aggregate ceiling under real concurrency, as a two-sided identity.** Runnable,
-  untested, and the next task. `loop_bucket_conservation` proves
+  **(2) RETIRED — LANDED IN #16, AND THE LIST SAID OTHERWISE FOR EIGHT DAYS.** #16 merged
+  2026-09-06 and this correction is 2026-09-14; both dates are from `gh`, because the first
+  draft of this sentence said "twenty-two days" from memory and was wrong by a factor of
+  nearly three. This entry read "Runnable, untested, and the next task" from #9 until this
+  commit. It was filed
+  as stale under the stopping rule and is corrected here; the staleness is instance FIVE of
+  the pattern recorded under gap one, and the first that was knowingly left in place.
+
+  What actually ships, read out of `test/t_adce_harness.c` rather than out of the filing:
+  `test_harness_concurrent` asserts `harness_bucket_identity(st, label) == 0` PER THREAD, and
+  then the two-sided AGGREGATE identity
+  `threads*C + R*sum(span) == sum(K*A) + sum(L) + sum(tau)`, summed per thread rather than
+  collapsed onto one global span because each thread contributes its own capacity. The
+  one-sided `admitted <= ceiling` check is still there beside them; it was never removed, and
+  keeping it is correct — it is a different statement, not a weaker copy of the same one.
+
+  **What the entry said was blocking it was also wrong.** It named `first_gap_ns` and the
+  per-thread `t_start`/`t_last` as "not recorded in `t_adce_harness.c`". They are recorded;
+  that is what `sum_span`, `sum_L` and `sum_tau` are built from. The read-only-observer
+  argument the entry said "must be stated rather than assumed" was stated, in #6's terms, and
+  is in the entry on the snapshot above.
+
+  Kept in place rather than deleted, per the convention entry (1) established: a retired entry
+  that names its result is what stops the next reader re-opening it. The original text is
+  preserved below for what it says about the blind spot, which has NOT changed:
+
+  *(as originally written)* `loop_bucket_conservation` proves
   `K*A == C + R*span - R*delta_0 - tau_final` single-threaded on both clocks; the shipped
   configuration is per-thread buckets whose aggregate ceiling is `threads * rate`, which the
   deployment-tuning comment in `adce_enforce.h` warns is misread as a global ceiling.
-  `test_harness_concurrent` covers that configuration only ONE-SIDEDLY
-  (`admitted <= rate*elapsed + capacity`).
 
   That one-sidedness is a measured blind spot, not a theoretical one. Two scratch mutations
   in #14: advancing `last_refill_ns` on admission only over-admits 65% (13806 against 8368)
@@ -2174,6 +2197,28 @@ looking.
   which is the stopping rule's admitted exception, and is kept with its resolution rather
   than deleted. Item 5 came from this one.
 
+  **THE LIST WAS CLEARED ON 2026-09-14.** Status of every item at that point, so the next
+  reader does not have to reconstruct it from six paragraphs:
+
+  | # | what was filed | outcome |
+  |---|---|---|
+  | 1 | entry (2) of the unverified list stale since #16 | **FIXED** — entry (2) retired above, 8 days stale |
+  | 2 | `boundary-note` selector blind to `bench/` | **FIXED** — selector derived, names no directory |
+  | 3 | a commit attempted on `main`, twice | **FIXED (partially)** — `scripts/githooks/pre-commit`; a fresh clone is still unprotected, see below |
+  | 4 | ran-tests guard split-line false red | RESOLVED by #35, already recorded |
+  | 5 | the #35 NOTE asserts a splice its predicate does not establish | **FIXED** — the NOTE names the observation |
+  | 6 | `ADCE_PUBLIC_NO_INTERNAL_USER` is a marker nothing reads | **RESOLVED 2026-09-14** by #26 merging |
+
+  **Two items were carried in conversation that were never in this list**, and the difference
+  is worth recording because a filing that lives only in a message is not filed at all:
+
+  - *the exclusivity assertion is singular* — recorded in the M4 table when the per-thread
+    counter landed, but never entered here as an apparatus item. Now marked in
+    `test/t_adce_observe.c` at the loop itself, which is where a reader meets it.
+  - *#26's fourth commit stretched its stated scope* — it carried the record AND a script
+    guard for the missing-interpreter path. That was never written down anywhere in this
+    repository; it existed only in a hand-off message. Recorded now as the item below.
+
   1. **Entry (2) of the unverified list is stale, and has been since #16.** It still reads
      "Runnable, untested, and the next task" for the aggregate ceiling under real concurrency.
      That landed in #16: `harness_concurrent` asserts `harness_bucket_identity` per thread and
@@ -2299,8 +2344,92 @@ looking.
      is the design working. What is not true is that anything enforces the annotation's
      spelling, placement, or continued accuracy.
 
-     NOT FIXED: merging or closing #26 is a gate decision and belongs in its own pull
-     request.
+     **RESOLVED 2026-09-14, when #26 merged.** The `internal-use` job is on `main` and reads
+     the annotation; the marker is no longer a marker with no gate. On first contact the two
+     annotations #38 had written blind both PASSED — parsed, reasons extracted, listed as
+     declared rather than defects, with nothing adjusted to make that happen. That is n = 2
+     and is recorded with its caveat in the internal-use entry above. A closed item is not
+     carried forward; this one is kept with its resolution and its date, like item 4.
+
+  7. **#26's fourth commit carried a script change alongside the record, which its own stated
+     scope did not cover.** The commit is titled as the rebase record and it also added the
+     missing-`python3` preflight to `scripts/check-internal-use.sh`.
+
+     The instruction it was written under said to keep #26's three commits and add a fourth
+     "only for the record items". The guard is not a record item — it is a gate change, and
+     this document's own rule is that a gate change lands in its own commit with its own
+     reason, precisely so it cannot ride along with something else.
+
+     **It was flagged at the time rather than hidden**, and the reason it was done that way is
+     still the reason: the alternative was amending #26's first commit, which would have
+     rewritten the three commits that were the reviewed history of the proposal. Choosing
+     between "the gate change rides with the record" and "the reviewed history is rewritten"
+     is a real trade and neither option satisfies the rule.
+
+     NOT FIXED, and not fixable retrospectively: #26 is merged and squashed, so there is no
+     longer a fourth commit to split. What is recorded is the precedent — **a rebase that has
+     to repair the thing it rebases needs its repair proposed as its own pull request, or the
+     scope statement needs to admit the repair up front.** The third option, shipping a gate
+     change inside a record commit because splitting it was awkward, is the one that was
+     taken and should not be taken again.
+
+- **THE PRE-COMMIT HOOK EXISTS AND A FRESH CLONE DOES NOT HAVE IT.** `scripts/githooks/pre-commit`
+  refuses a commit made while `HEAD` is on `main`, naming the branch and leaving the staged
+  changes intact. Built because the mistake occurred twice, both times from trusting a
+  session-start status line instead of re-deriving the branch.
+
+  **What it buys is narrower than "protects main".** The ruleset already makes a direct push
+  impossible — GH013 — so a commit on `main` could never have landed. What it can do is sit on
+  top of a squashed merge where an `--amend` rewrites it, which is exactly what happened to
+  `73eff8f`. The hook moves the refusal from push time to write time. The `--amend` case was
+  mutation-proved specifically, since that is the shape the second instance took.
+
+  **The false-positive claim was checked and is narrower than filed.** The filing said the rate
+  is "structurally ZERO". Of 80 commits on `main`, 34 end in `(#N)` and 46 do not; all 46 are
+  dated 2026-09-04 or earlier, and every commit from 2026-09-06 on is a squash merge. So it is
+  zero against the practice in force since the ruleset, over 34 merges, and the practice
+  changed once.
+
+  **THE PRECEDENT THE FILING CITED WAS THE WRONG MECHANISM.** It said `scripts/hooks/` "carries
+  `post-edit-build.sh` and `stop-verify.sh`, so there is a home for it and a precedent for the
+  mechanism". Those are CLAUDE CODE AGENT hooks wired through `.claude/settings.json`. Git never
+  runs them and they would not see a commit typed at a terminal. `.git/hooks` held only samples
+  and `core.hooksPath` was unset. The new hook lives in `scripts/githooks/` so the two
+  mechanisms are not conflated.
+
+  **A FRESH CLONE IS UNPROTECTED, AND THAT IS THE FINDING, not a caveat.** Measured in a real
+  clone before any install step: `core.hooksPath` unset, zero active hooks, and a commit on
+  `main` SUCCEEDED. `.git/hooks` is inside `.git` and cannot be tracked, so a committed hook
+  cannot install itself. `core.hooksPath` does close it —
+  `git config core.hooksPath scripts/githooks`, one command, after which the refusal works —
+  but running that command is itself the manual step, and an install script only moves the
+  manual step into a different command. **There is no arrangement in which cloning this
+  repository gives you this control.**
+
+  This project ranks a control that arrives only by manual setup below one the gate runs, for
+  the same reason a silently-skipping profile is worse than one that does not exist: a clone
+  without the config is indistinguishable from a clone with it until someone commits on `main`
+  and nothing happens. It is kept because the alternative at the moment of the mistake is
+  nothing, and because the mistake has occurred twice. It must not be described as protecting
+  `main`.
+
+- **`ADCE_TEST_ASSERT(seen[i] != seen[j])` IS THE ONLY CHECK OF SLOT EXCLUSIVITY IN THIS
+  REPOSITORY, and the violation it catches is arithmetically invisible.** Marked at the loop
+  itself in `test/t_adce_observe.c` as well as here, because the fact was previously recorded
+  only in this document while the assertion it describes sat in a file that did not mention it.
+
+  Measured, not assumed: mutation M4(ii) made `adce_obs_claim_counter` hand out a duplicate
+  slot and ran the whole suite. Exactly one case failed. Two threads sharing a slot still
+  increment it atomically, so no arrival is lost and
+  `total_tapped == arrivals_closed + discarded + residual` stays exactly true at both sites.
+  What is destroyed is the only thing the per-thread counter design exists for: the two threads
+  are back on one cache line — the true sharing #33 measured at 12x to 77x — under a green
+  suite.
+
+  **NO SECOND ASSERTION WAS ADDED.** A duplicate of the same check is not independent evidence,
+  and this document already has an entry on a green never seen failing. What protects the
+  property is that the next person to touch `adce_obs_claim_counter` knows this line is the
+  only guard, which is why the fact is written at the loop rather than defended with a copy.
 
 - **`adce_seqlock_read_retry` NOW REJECTS AN ODD START, and the defect class is the INVERSE
   of the `adce_epoch_is_stale` one.** Approved as option 1 of four and implemented; the three

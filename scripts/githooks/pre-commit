@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Refuse a commit made while HEAD is on the protected branch.
+#
+# WHY THIS EXISTS. Twice in this repository a commit was written onto `main`
+# because a session-start status line naming the working branch was TRUSTED at
+# write time instead of re-derived. The second instance rewrote 73eff8f, the
+# squashed merge of #33, with `git commit --amend`. Nothing reached the remote
+# and origin/main was never touched -- but the thing that would have stopped
+# the push is the ruleset's non_fast_forward rule, not any local discipline,
+# and a control that only catches the mistake at push time lets the local
+# history get rewritten first. This refuses it at the moment it is made.
+#
+# ITS FALSE-POSITIVE RATE, VERIFIED RATHER THAN ASSERTED. The claim is that no
+# commit here is ever INTENDED to land directly on main, so refusing all of
+# them costs nothing. That is true of current practice and is not true of this
+# repository's whole history: of 80 commits on main, 34 end in `(#N)` and 46 do
+# not. The 46 are all dated 2026-09-04 or earlier -- before the ruleset existed
+# -- and every commit from 2026-09-06 onward arrived as a squash merge. So the
+# honest statement is that the false-positive rate is zero against the practice
+# in force since the ruleset, measured over the 34 merges since, and that the
+# practice changed once and could change again.
+#
+# THE ESCAPE IS DELIBERATELY GIT'S OWN. `git commit --no-verify` skips this,
+# and no repository-specific override is added on top. A second escape would be
+# a second thing to remember and would not be more honest than the standard one
+# every git user already knows.
+set -euo pipefail
+
+protected="main"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+if [ "$branch" != "$protected" ]; then
+    exit 0
+fi
+
+cat >&2 <<EOM
+REFUSED: you are committing on '$protected'.
+
+Landing on '$protected' is enforced by a GitHub ruleset, not by convention:
+a pull request is required, three status checks must pass, bypass_actors is
+empty, and non_fast_forward is forbidden. A direct push is rejected with
+GH013. So a commit made here cannot become part of '$protected' by any route
+-- it can only sit in local history, where the danger is that it lands ON TOP
+of a squashed merge and an --amend then rewrites it.
+
+That has happened twice in this repository, both times from the same cause:
+a status line naming the working branch was trusted at write time instead of
+re-derived.
+
+WHAT TO DO:
+
+  git switch -c <branch-name>     # then commit; the work is unchanged
+  git stash                       # if you would rather move it later
+
+The staged changes are untouched either way -- nothing has been lost.
+
+If you genuinely mean to commit on '$protected', use git's own escape:
+
+  git commit --no-verify
+
+EOM
+exit 1
