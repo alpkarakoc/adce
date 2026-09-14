@@ -765,6 +765,32 @@ static int test_obs_claim_capacity(void) {
         seen[i] = adce_obs_claim_counter(&ctx);
         ADCE_TEST_ASSERT(seen[i] != NULL);
         for (j = 0; j < i; ++j) {
+            /* LOAD-BEARING AND SINGULAR. This inequality is the ONLY thing in
+             * this repository that catches two ingress threads being handed the
+             * same slot, and the violation it catches is ARITHMETICALLY
+             * INVISIBLE everywhere else.
+             *
+             * Measured, not assumed -- mutation M4(ii) of the per-thread
+             * counter work made adce_obs_claim_counter hand out a duplicate
+             * slot and ran the whole suite: exactly one case failed, this one.
+             * Both sites of
+             *
+             *     total_tapped == arrivals_closed + discarded + residual
+             *
+             * stayed exactly true, and they must: two threads sharing a slot
+             * still increment it atomically, so no arrival is lost and every
+             * conservation statement in the suite holds. What is destroyed is
+             * the only thing the per-thread counter design exists for -- the
+             * two threads are back on ONE cache line, which is the true sharing
+             * #33 measured at 12x to 77x, restored under a green suite.
+             *
+             * DO NOT ADD A SECOND ASSERTION HERE TO REDUCE THE RISK. A
+             * duplicate of this same check is not independent evidence of
+             * anything, and this project has an entry on a green never seen
+             * failing. What protects this property is that the next person to
+             * touch adce_obs_claim_counter knows this line is the only guard --
+             * which is why the fact is written here and in CLAUDE.md rather
+             * than defended with a copy. */
             ADCE_TEST_ASSERT(seen[i] != seen[j]);
         }
     }
