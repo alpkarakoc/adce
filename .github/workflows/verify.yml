@@ -332,20 +332,30 @@ jobs:
 
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
 
-          # include/ IS IN SCOPE and its absence was the defect. The entire
-          # Enforcement Plane is include/adce_enforce.h with no .c file at all --
-          # a locked decision -- and the platform layer is header-only, so the
-          # original ^(src|test)/.*\.c$ let a change to a whole plane through
-          # without asking. Demonstrated on PR #26: four headers changed, and
-          # this job printed "Nothing to ask about".
+          # NO DIRECTORY IS NAMED HERE, AND THAT IS THE REPAIR. This selector
+          # went blind twice from the same cause, not two causes: it was written
+          # from where its author ASSUMED code lived. First ^(src|test)/.*\.c$
+          # missed include/, where the whole Enforcement Plane lives by locked
+          # decision -- PR #26 changed four headers and this job printed
+          # "Nothing to ask about". #29 repaired that by adding include/. Then
+          # ^(src|include|test)/.*\.(c|h)$ missed bench/, which #33 created.
+          # Adding bench/ would fix the instance and leave the class open for
+          # whatever directory is made next.
           #
-          # The extension covers .h under src/ and .c under include/ as well.
-          # Neither exists today. Naming the directories and then guessing their
-          # extensions is how the first version went blind, so the pattern is
-          # written to survive a file landing where this author did not expect
-          # one.
-          code="$(printf '%s\n' "$changed" \
-                  | grep -E '^(src|include|test)/.*\.(c|h)$' || true)"
+          # The property is decidable per FILE and does not need a directory
+          # list at all: a changed file is code if it is a .c or .h file. That
+          # is what is tested. Checked rather than assumed -- over all 15
+          # tracked .c/.h files the extension test and the directory form
+          # derived from `git ls-files '*.c' '*.h'` agree exactly, so the
+          # derived list (bench|include|src|test) buys nothing today, and the
+          # extension test additionally survives a code file at the repository
+          # root, which the directory form silently drops.
+          #
+          # Replayed over the last 25 merges before this change: the fire/quiet
+          # verdict is IDENTICAL to the old selector on every one except
+          # 73eff8f, the pull request that created bench/tap_contention.c. That
+          # one went quiet and should not have. One flip, and it is the hole.
+          code="$(printf '%s\n' "$changed" | grep -E '\.(c|h)$' || true)"
           if [ -z "$code" ]; then
               echo "No shipping or test source changed. Nothing to ask about."
               exit 0
