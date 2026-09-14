@@ -139,10 +139,16 @@ assert_all_tests_ran() {
         total=$(grep -c 'TEST OK: ' "$log" 2>/dev/null || true)
         well=$(grep -cE '^TEST OK: [A-Za-z0-9_]+$' "$log" 2>/dev/null || true)
         if [ "${total:-0}" -ne "${well:-0}" ]; then
-            echo "NOTE[$profile]: the log has $total 'TEST OK:' occurrences but" \
-                 "only $well well-formed lines -- output was SPLICED, so the" \
-                 "names above may have run and been corrupted rather than" \
-                 "skipped. Check that stderr is not merged into this log." >&2
+            echo "NOTE[$profile]: the log has $total 'TEST OK:' occurrences" \
+                 "but only $well well-formed lines. THE TWO COUNTS DISAGREE;" \
+                 "that is the observation, and this note does not name its" \
+                 "cause. The leading explanation is a SPLICE -- a write on" \
+                 "another stream landing inside a half-flushed line -- which" \
+                 "would mean the names above ran and were corrupted rather" \
+                 "than skipped; check that stderr is not merged into this" \
+                 "log. It is not the only explanation: a line that legitimately" \
+                 "contains 'TEST OK: ' somewhere other than column 1 produces" \
+                 "the same disagreement with nothing spliced anywhere." >&2
         fi
     fi
     return "$bad"
