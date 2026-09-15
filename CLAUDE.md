@@ -148,11 +148,130 @@ looking.
   API decision. Propose it and wait for confirmation; never fold it into a step whose
   stated scope was something else.
 - `__int128` / `unsigned __int128` is a deliberate, load-bearing compiler extension, not
-  an oversight. `adce_q16_mul`, `adce_q16_div`, and the token bucket all need a width
-  above 64 bits, and `ADCE_Q16_MAX` is `INT64_MAX`, so a 16-bit left shift of a full-range
-  numerator does not fit in `int64_t`. The dependency is made explicit by the `#error`
-  guard at the top of the header. Do not "clean it up" — it cannot be removed without
-  narrowing the Q16 lane, which is a separate design decision.
+  an oversight. **Its scope is narrower than this entry recorded for most of the project's
+  life, and the correction is below rather than folded in silently.** Nothing is removed;
+  what changes is how many legs the justification actually stands on.
+
+  Three sites use the width, and they are NOT three independent shipping justifications:
+
+  | site | reaches 128-bit | shipping call sites |
+  |---|---|---|
+  | `adce_q16_mul` | own body | **0** |
+  | `adce_q16_div` | own body | **0** |
+  | `adce_token_refill` | **own body, directly** | 1 (`adce_enf_decide`) |
+
+  **The token bucket does not reach the width through the Q16 helpers.** Read out of the
+  source rather than carried: `adce_token_refill`'s first statement is
+  `adce_u128_t added = (adce_u128_t)rate_q16_per_ns * (adce_u128_t)elapsed_ns;`, then the
+  sum, then the clamp. It calls neither `adce_q16_mul` nor `adce_q16_div`. So the one
+  executed leg is independent of the two that are not executed, and removing either Q16
+  helper would not touch it.
+
+  `ADCE_Q16_MAX` is `INT64_MAX`, so a 16-bit left shift of a full-range numerator does not
+  fit in `int64_t` — that argument is about `adce_q16_div` specifically, which is the leg
+  with no shipping caller. The dependency is made explicit by the `#error` guard at the top
+  of the header. Do not "clean it up" — it cannot be removed without narrowing the Q16 lane,
+  which is a separate design decision. **That conclusion survives, but on the PUBLISHED LANE
+  rather than on three shipping paths**, and the difference matters when someone next weighs
+  the extension against portability.
+- **The `__int128` re-derivation, measured. At the SHIPPED tuning no execution path can
+  reach a 64-bit overflow at all.** The evidence behind the re-scoped locked decision above,
+  taken by RUNNING each site against a 64-bit formulation of itself rather than by reasoning
+  about widths. Every row below was reproduced on this tree, not carried from the branch
+  that first wrote it.
+
+  | site | first divergence from a 64-bit formulation | 64-bit result | shipping callers |
+  |---|---|---|---|
+  | `adce_q16_mul` | operands of `65536.0` (raw `2^32`) | `0.0` where the true product is `4294967296.0` | 0 |
+  | `adce_q16_div` | numerator raw `2^47` (`2147483648.0`), divisor `3.0` | **sign inverted**: `-715827882.67` for `+715827882.67` | 0 |
+  | `adce_token_refill` | `elapsed_ns = 2,635,249,153,387,078,803` at `R = 7` | `5` raw where the true value is the full capacity | 1 |
+
+  The refill row was checked on BOTH sides of the boundary, which is what makes it a
+  threshold rather than an example: at `floor(2^64/7) = 2,635,249,153,387,078,802` the two
+  forms AGREE, and at `floor + 1` they diverge.
+
+  **The token bucket's threshold is 83.51 years of idle time**, which is `floor(2^64 / R)`
+  at the shipped `ADCE_ENF_RATE_Q16_PER_NS` of 7, expressed in 365.25-day years.
+  `elapsed_ns` is time since that thread's last stage-two arrival, so reaching it means one
+  ingress thread taking no admitted traffic for eight decades. It is not reachable by any
+  deployment of this code.
+
+  **And the clamp masks even that, almost entirely.** A wrapped product still exceeding
+  capacity clamps to capacity either way, so the two forms agree unless the wrap lands BELOW
+  `C`. That window is `C / R` wide — **38,347,922 ns, about 38.35 ms, out of every 2.635e18
+  ns, which is 1.46e-9 % of the range.** `C / R` is the same quantity this codebase already
+  knows as the gap that refills a starved bucket to capacity, printed as `38347922ns` by
+  `loop_bucket_conservation`; the two are the same number arrived at from opposite ends.
+
+  So the width at that site is **defensive against retuning and against consumer-supplied
+  rates, not against the shipped configuration.** The rate at which it starts to matter is
+  `2^64 / T` for an idle window `T`: **584.5 for a year of 365.25 days**, 213,504 for a day,
+  5.12e6 for an hour. The year figure carries its convention because it moves with it —
+  584.9 at 365 days, 586.6 at 52 weeks — and the branch this entry came from said "about
+  586" without one, which is the only figure of the set that did not reproduce. The
+  deployment tuning block invites exactly this retuning, which is why the width stays.
+
+  **What this does and does not overturn.** It does NOT overturn the decision: the lane is
+  published, `adce_q16_div` is callable by consumers at full range, and at full range the
+  64-bit form inverts the sign — stated as a fact rather than as a safety property, though
+  it is worth knowing that a negative Q16 reads as MAXIMAL by the clamp rule, so the failure
+  would be wrong rather than open. It DOES overturn the entry's weight. "All three need a
+  width above 64 bits" is true of the three FUNCTIONS and false as a count of shipping
+  justifications, and a justification standing on one of three named legs is weaker than the
+  old wording read.
+
+  **THE GATE CANNOT SEE THIS, AND THAT IS THE MEASURED CASE FOR REFINING IT.** `internal-use`
+  is now live on `main`, and run against this tree it places all three sites in columns that
+  read as healthy:
+
+  | site | `internal-use` column | what the gate concludes | what is true |
+  |---|---|---|---|
+  | `adce_q16_mul` | **annotated green** | public API with no internal user, by design | no shipping path executes it |
+  | `adce_q16_div` | **annotated green** | same | same |
+  | `adce_token_refill` | **live** (1 shipping caller, never printed) | wired up | correct |
+
+  The check asks one question — does a call edge exist from shipping code — and answers it
+  exactly. It does not and cannot ask whether the justification written ABOUT a function is
+  still true, because that is a fact about prose evaluated against the call graph, and the
+  gate reads only the call graph. **Two of the three legs the locked decision names sit in
+  the green column while contributing nothing to the conclusion.** Nothing went red here;
+  nothing should have. This is the boundary of what a zero-caller predicate can reach, found
+  by hand, and it is the concrete case for the three-way live / test-only / dead refinement
+  rather than an argument for it. That refinement is NOT started here.
+
+  **This is the third instance of one class in as many tasks**, and the class is now worth
+  naming as a habit rather than as an incident: `adce_epoch_is_stale`, the `__int128` legs,
+  and `adce_rng_next_unit` are all prose that names a real function, describes its behaviour
+  correctly, and is wrong about the system because the code takes a different path. The
+  common cause is that **a justification is written once, at the moment it is true, and is
+  never re-evaluated against the call graph afterwards.** `scripts/check-internal-use.sh`
+  catches the zero-caller end of it. It does not catch this one, and nothing does: a leg with
+  ONE shipping caller is invisible to a zero-caller check, and two of the three functions the
+  Q16 lane annotation names are annotated-green rather than red. Read every named
+  justification in this document as dated.
+
+- **THE MERGE IDIOM BROKE WHEN `internal-use` LANDED DELIBERATELY RED, and the cost was
+  priced in late.** `gh pr checks <n> && gh pr merge <n>` stops at the first command:
+  `gh pr checks` exits non-zero unless EVERY check is green, and `internal-use` is
+  permanently red by design, holding two open API questions visible. So the chain silently
+  performs no merge.
+
+  The correct form is `gh pr checks <n> --required && gh pr merge <n>`, which narrows the
+  criterion to the three ruleset contexts — `sanitizers (ubuntu-24.04)`,
+  `sanitizers (ubuntu-24.04-arm)`, `shipping-target`. **Dropping the check from the command
+  entirely would remove verification rather than narrow it**, and that is the wrong repair
+  for a command that failed by being too strict.
+
+  **The cost, stated because it was not priced when the check was designed.** A permanently
+  red advisory check makes "all green" unusable as a merge criterion for as long as it stays
+  red — not just for that pull request, for every one after it. The check's own design
+  treats the red as the feature, and it is; what was not noticed is that it consumes a
+  second thing, the simplest available expression of "is this safe to merge". The bound on
+  that cost is the five-pull-request answer window opened at #26's merge: the red is
+  supposed to be answered, and when it is, `--required` stops being load-bearing. If the
+  window closes with the reds still standing, this stops being a transitional cost and
+  becomes a standing one, which is a fact the window's review should weigh.
+
 - The shipping target builds and its tests pass under GCC 14 on linux/arm64 and
   linux/amd64 (`scripts/verify-linux-gcc.sh`). GCC's `__int128` pedwarn under `-pedantic`
   is resolved by `__extension__` on the two typedefs, with every use routed through them:
