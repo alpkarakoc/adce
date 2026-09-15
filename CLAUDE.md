@@ -53,8 +53,12 @@ looking.
 - `include/adce_enforce.h` — the ENTIRE Enforcement Plane, inline, with no `.c` file: the
   outcome enum, `adce_enf_ctx_t`, the deployment tuning block, `adce_enf_should_shed`,
   `adce_enf_classify_stale`, `adce_enf_decide`, `adce_enf_admit`, `adce_enf_thread_init`.
-  Integer arithmetic only — no `double` and no `adce_rng_next_unit` — per the lane
-  convention in `adce_platform.h`. Every function that must be reachable from a test takes
+  The RNG lane rule is stated at the head of this header, in the plane it binds: the Ingest
+  and Enforcement planes drive stochastic drop decisions from `adce_rng_next()` and INTEGER
+  COMPARISONS ONLY, because that is what makes a verdict exactly reproducible from a
+  recorded draw. It named `adce_rng_next_unit` and lived in `adce_platform.h` until that
+  function was removed on 2026-09-15; the requirement outlived it because it was never about
+  that function. Every function that must be reachable from a test takes
   its nondeterminism as a PARAMETER: `now_ns` and the RNG `draw`. That is structural, not
   stylistic, and the reason is in the plane doc: `adce_rng_tls` is `static _Thread_local`
   at file scope, so a test TU cannot observe or seed the stream an enforcement TU draws
@@ -1193,10 +1197,25 @@ looking.
   fails when the mechanism is removed, not the function whose behaviour it describes.** Those
   are different things, and this entry exists because they were confused once.
 
-- **OPEN API QUESTION, proposed and NOT decided: what is `adce_epoch_is_stale` for?**
-  Recorded here rather than acted on, because it is `static inline` in a public header and
-  removing or changing it is an API decision, which the working agreement requires to be
-  proposed and waited on. Nothing about it is changed in the commit that adds this entry.
+- **ANSWERED 2026-09-15 — `adce_epoch_is_stale` is KEPT, as the consumer-side companion to
+  `adce_epoch_read`.** The question and its two readings are preserved below as the record of
+  what was weighed; the heading is changed because an open-question heading standing above an
+  answered question would manufacture, at the exact site documenting it, the class this
+  document is named after. Reading (1) was taken. The full argument, the cost of each rejected
+  reading and a third reading neither branch anticipated are in the decision entry further
+  down.
+
+  One premise below is FALSE and is corrected rather than left standing: the sentence that
+  "`docs/enforcement-plane.md` §4.1 and `docs/observation-plane.md` both describe
+  consumer-side staleness checking" does not survive reading them. Every doc and comment
+  reference describes the LIBRARY's behaviour — "Enforcement takes its conservative posture",
+  "`adce_enf_decide` takes the stale branch" — and not one invites a consumer to call it.
+  README.md does not name it either. The decision rests on the API SURFACE instead, which is
+  a different argument and a sounder one.
+
+  *(the question as originally recorded)* Recorded here rather than acted on, because it is
+  `static inline` in a public header and removing or changing it is an API decision, which
+  the working agreement requires to be proposed and waited on.
 
   The question is exactly two-sided and the evidence does not settle it:
 
@@ -1263,6 +1282,12 @@ looking.
   answer an API question the working agreement requires to be proposed and waited on. The red
   IS the open question, held visible until it is answered.
 
+  **That table is a MEASUREMENT DATED to this entry and its third row is now closed.** Both
+  functions in "genuinely open" were decided on 2026-09-15: `adce_epoch_is_stale` kept and
+  annotated, `adce_rng_next_unit` removed. The row is left as written because it records what
+  the check found on its first run, which is the point of the entry; it must not be read as a
+  current state.
+
   So: it does NOT fire on `adce_epoch_is_stale` alone. It fires on fourteen, thirteen of
   which are explained on their first encounter and stay quiet afterwards. Recorded this way
   round because measuring after asserting is how a number gets fitted to a conclusion, which
@@ -1297,8 +1322,16 @@ looking.
 
   Neither check is in the ruleset's required contexts, so both show red without blocking.
 
-- **SECOND OPEN API QUESTION, found by the check on its first run: what is
-  `adce_rng_next_unit` for?** Proposed and NOT decided; nothing about it is changed.
+- **ANSWERED 2026-09-15 — `adce_rng_next_unit` is REMOVED, and the rule it anchored moved to
+  the plane it binds.** The question is preserved below as the record of what was weighed.
+  Its closing sentence — that the convention is "a live rule whether or not anything calls the
+  function" — was right, and is exactly why the removal was incomplete until the rule had a
+  new home. What the entry got WRONG is its premise that the convention was anchored only
+  here: it is recorded in four places, so removal deleted no rule. Details in the decision
+  entry further down.
+
+  *(the question as originally recorded)* Proposed and NOT decided; nothing about it is
+  changed.
 
   It has zero shipping call sites and one test call site. Its own comment in
   `adce_platform.h` says it is "confined to the Observation Plane by convention", and
@@ -1398,10 +1431,19 @@ looking.
   deliberately no environment variable that converts this to a skip**: a gate that passes
   because an interpreter is missing is the class this project ranks worse than no gate at all.
 
-  **THE FIVE-PULL-REQUEST ANSWER WINDOW STARTS AT THIS MERGE, and it has never run before.**
-  The two reds — `adce_epoch_is_stale` and `adce_rng_next_unit` — stay unannotated by
-  decision. The red IS the open API question, held visible rather than papered over with a
-  marker.
+  **THE FIVE-PULL-REQUEST ANSWER WINDOW STARTED AT THIS MERGE AND CLOSED ON 2026-09-15, AFTER
+  TWO, BY BEING ANSWERED.** The two reds — `adce_epoch_is_stale` and `adce_rng_next_unit` —
+  stayed unannotated by decision while the question was open, because the red WAS the open API
+  question, held visible rather than papered over with a marker. Both are now decided: the
+  first kept and annotated with a substantive reason, the second removed with its rule
+  relocated. `internal-use` reads 39 / 24 / 15 / 0 and exits 0.
+
+  **The distinction that matters is ANSWERED rather than SILENCED.** Clearing the red by
+  annotating both would have produced the identical green, and would have been the move the
+  red existed to prevent. The window did not force it: three of five pull requests remained
+  when the questions were resolved, and the count was derived from `gh` rather than carried —
+  the advisor's belief that three had merged included #38, which merged nineteen minutes
+  BEFORE #26 on the same morning.
 
   **The cost of a proposed-but-unlanded gate, measured.** #26 was opened 2026-09-10 and
   **twelve pull requests merged before it** — #23, #24, #25, #29, #31, #32, #33, #34, #35,
@@ -2631,6 +2673,179 @@ looking.
   two, and the two are not redundant — the retry predicate makes a no-spin reader FAIL, while
   the spin makes the composed reader WAIT and then succeed. Assertion 4 of that case is what
   keeps the second half honest.
+
+- **THE TWO OPEN API QUESTIONS, ANSWERED 2026-09-15. The five-pull-request window closed
+  after two, by being ANSWERED rather than silenced.** Both were held open by `internal-use`
+  reading red; clearing the red by annotating both would have produced the identical green
+  and would have been the move the red existed to prevent.
+
+  **DECISION 1 — `adce_epoch_is_stale` KEPT, annotated as the consumer-side companion to
+  `adce_epoch_read`.** The reader is public, so a consumer may read the epoch itself rather
+  than through `adce_enf_decide`, and one that does needs a staleness predicate. Hand-rolling
+  one loses the FUTURE case: a signed difference, a saturating guard, or an explicit
+  `observed_at_ns > now_ns` branch returning 0 all report a publication from the future as
+  FRESH — fail-closed to fail-OPEN on the one axis this plane may never fail open on.
+  Publishing the reader without the predicate would ship the trap and withhold the guard.
+
+  **The reading the earlier entry leaned on does not survive contact with the docs.** It said
+  the plane documents lean toward "public API" because they describe consumer-side staleness
+  checking. They do not: all seven doc and comment references describe the LIBRARY's
+  behaviour, and README.md does not name the function at all. The decision rests on the API
+  surface instead — a different argument, and a sounder one, because it turns on what is
+  published rather than on what was written about it.
+
+  Rejected readings and their costs, concretely:
+
+  | reading | cost of taking it |
+  |---|---|
+  | dead code with tests — delete | 14 test call sites across four files break; `test_enf_stale_route_equivalence` loses its oracle, and nothing else in the repository computes the stale boolean independently. Rebuilding one means a second implementation written into the test suite purely to be compared against — a reference predicate again, one directory over |
+  | test oracle — move to `test/` | coherent, and it would remove the function from the gate's population rather than annotating around it. Rejected because it presumes the consumer-companion reading is false, and that reading is what the published surface supports. Moving it leaves `adce_epoch_read` published with no companion |
+
+  **DECISION 2 — `adce_rng_next_unit` REMOVED, and the rule it anchored relocated to
+  `include/adce_enforce.h`.** Zero shipping callers, one test caller, a one-line body, and a
+  technique `docs/enforcement-plane.md` documents independently.
+
+  The declaration comment held two clauses and only one dies. The CONFINEMENT clause — the
+  function belongs to the Observation Plane — goes with the function. The POSITIVE
+  REQUIREMENT survives: the Ingest and Enforcement planes drive stochastic drop decisions
+  from `adce_rng_next()` and INTEGER COMPARISONS ONLY, because that is what makes a verdict
+  exactly reproducible from a recorded draw, which §5 is built on.
+
+  **Sited on the plane it binds, not the layer it left.** The platform header was the wrong
+  home: the rule constrains other layers, and it survived there only as a comment on the very
+  function it excluded. **A requirement sited on the thing it forbids disappears when that
+  thing does.** On the plane it governs, it cannot.
+
+  **TWO RESTATEMENTS ARE FORBIDDEN, both proposed and withdrawn, and the second was refuted
+  by a measurement rather than by argument.** "No floating point in the Enforcement Plane"
+  drops the positive half and the reproducibility reason, and is unintelligible against the
+  code: the Observation Plane ships **15 `double` tokens** and this rule does not govern it,
+  so a bare type prohibition reads as contradicted by a plane it says nothing about. The
+  Enforcement Plane's **zero is now CHECKED rather than asserted** — a verified zero and an
+  asserted zero read identically on the page and are not the same evidence.
+
+  **DECISION 3 — FILED, NOT FIXED.** The confinement clause was VACUOUS and was so before
+  this change: it said the function is confined to the Observation Plane, and the Observation
+  Plane never called it. Prose correct about the function and wrong about the system — the
+  recorded class, found at the site of a rule rather than at the site of a mechanism. It
+  would have been TRUE had the function stayed and been used; it was false because the
+  function was never used at all. Filed below.
+
+- **THE D2 ORACLE MEASUREMENT: `test_enf_stale_route_equivalence` is independent on 2 of its
+  16 assertions.** Derived by running the case's own offsets through the classifier rather
+  than by reading it.
+
+  | assertions | what decides them | independent? |
+  |---|---|---|
+  | 8 (`have == 0`) | both sides short-circuit; the arithmetic is never evaluated | no |
+  | 6 (`have == 1`, aged/fresh) | `(now_ns - observed_at_ns) > ADCE_ADVICE_TIMEOUT_NS` — **character-identical** in both functions | no |
+  | 2 (`have == 1`, future) | the unsigned wrap against the classifier's explicit `observed_at_ns > now_ns` branch | **yes** |
+
+  So "the classifier is checked against itself" is true of 14 of 16 and false of 2. The two
+  that survive cover the FUTURE route, which `docs/enforcement-plane.md` §4.3 calls
+  "accidental and now a contract" — the most valuable pair to have, and thinner than the
+  test's name suggests. Filed below.
+
+- **THE THIRTEENTH REFUTED ADVISOR FIGURE, AND IT IS NEVER-TRUE RATHER THAN STALE. This is a
+  different fault from the four entries about the list going stale, and must not be appended
+  to them.** Those indict record-keeping CADENCE: something was true, the world moved, the
+  record lagged. This indicts DERIVATION AT THE POINT OF WRITING: the figure was never true
+  of any tree.
+
+  Asserted: 13 `double` sites in shipping code — 12 Observation Plane, 1 the removed
+  function, 0 Enforcement. Derived, two independent ways agreeing: **17 tokens / 16 lines —
+  15 Observation, 2 the function, 0 Enforcement.**
+
+  **The method that established never-true rather than stale is the part worth keeping.**
+  Counting at every commit back to `4b83276`, across eight merges, returns 17 every time. A
+  stale figure has a commit where it was right; this one has none. No alternative counting
+  unit reproduces 13 / 12 / 1 either — lines rather than tokens gives 16, and excluding the
+  four macro-definition casts in `adce_observe.h` gives 13 tokens but splits 11 / 2 rather
+  than 12 / 1. It was read off a grep listing and never derived.
+
+  **WHERE IT WOULD HAVE LANDED IF UNCAUGHT, which is worth more than the corrected number.**
+  This very entry is required to explain the second withdrawn restatement as refuted BY THE
+  FLOATING-POINT POPULATION. Had 12 been carried unchecked, an unverified figure would have
+  shipped inside the entry describing how that figure served as evidence — **the record
+  contaminating itself at the exact point where it explains its own reasoning.** Not a wrong
+  number in a table, which the next reader might re-derive: a wrong number in the sentence
+  that tells the next reader why the number mattered, which invites inheritance rather than
+  checking.
+
+  That is the strongest argument this project has produced for a BLOCKING re-derivation gate
+  — a figure must be derived before the prose that depends on it is written, not after. The
+  refutation changed no decision: the Enforcement Plane's zero is what the argument needs and
+  it is confirmed, and the rejection stands harder at 15 than at 12. It changed only what the
+  record would have said about its own evidence.
+
+- **FILED, NOT FIXED — three new items, 2026-09-15.** Written here rather than left in a
+  hand-off message, because a filing that lives only in a message is not filed.
+
+  8. **`test_enf_stale_route_equivalence`'s name promises more than its predicate
+     establishes.** "Equivalence" reads as two implementations checked against each other
+     across the input space. Measured, it is 2 of 16: eight assertions short-circuit before
+     the arithmetic runs and six compare a character-identical expression to itself. The two
+     that are genuinely independent cover the future route. **The case is not wrong and
+     nothing it asserts is false** — this is a naming and expectation defect, and the risk is
+     that a future reader deletes `adce_epoch_is_stale` believing the equivalence argument
+     rests on a broad independent standard when it rests on two cases. NOT FIXED: renaming a
+     case or widening its oracle is test design and belongs in its own pull request, with the
+     question of what a genuinely independent standard would even be.
+
+  9. **There is no API stability or deprecation policy, and two breaking changes have now
+     shipped under its absence.** The first was #38, which removed the `counter` parameter
+     from `adce_obs_init` and `adce_obs_thread_start` as a deliberate clean break with no
+     compatibility shim. **This is the second**: `adce_rng_next_unit` is deleted from a public
+     header with no deprecation period, no version gate and no release note, because there is
+     no mechanism for any of those. The working agreement says an API decision is proposed and
+     waited on — that governs HOW a change is decided and says nothing about what a consumer
+     is owed once it is. Both changes were right on their merits; what is missing is any
+     statement of what a consumer may rely on between versions. NOT FIXED: writing that policy
+     is a decision about the project's obligations to users, not a repair, and it should not
+     be drafted inside the pull request that makes it visible.
+
+  10. **The vacuous confinement clause, per Decision 3.** `adce_rng_next_unit`'s comment said
+      it was "confined to the Observation Plane by convention" while the Observation Plane
+      never called it. Every word was true of the function; the sentence was false about the
+      system. **It would have become true had the function stayed and been used** — which is
+      what separates it from the other instances of this class, where prose described a route
+      the code had ABANDONED. Here the code never took the route at all, so the clause was
+      never true rather than having gone stale, the same distinction as the D4 refutation
+      above and found in the same turn. NOT FIXED because the clause is gone with the
+      function; filed because the CLASS is what matters and this instance names a new
+      sub-shape of it.
+
+- **GATE DEFECT FOUND IN PASSING: `check-internal-use.sh` ACCEPTS A BARE MARKER, which its own
+  error text says it must not.** Found by mutation M1 on 2026-09-15, written here this turn
+  and to be fixed in a later pull request of its own, per the standing rule that a gate change
+  lands separately from the work that found it.
+
+  The check's own guidance reads: *"The reason is required. A bare marker would make this a
+  token to paste."* M1 stripped the reason text from the new annotation, leaving
+  `ADCE_PUBLIC_NO_INTERNAL_USER:` with nothing after the colon. The check did NOT fail on that
+  function. It listed `adce_epoch_is_stale` under **declared, not defects**, with its reason
+  printed as `*/`.
+
+  **The mechanism, pinned rather than guessed.** The predicate is
+  `MARK \s*:\s*(\S[^\n]*)`, and `\s*` after the colon matches NEWLINES. The capture
+  therefore jumps to the next non-space character anywhere below — including the comment
+  block's own terminator. Probed across five shapes:
+
+  | annotation shape | result |
+  |---|---|
+  | bare marker, next line is `*/` | ACCEPTED, reason `*/` |
+  | bare marker, next comment line has unrelated prose | ACCEPTED, reason is that prose |
+  | bare marker, blank comment line, then prose | ACCEPTED, reason `*` |
+  | marker with no colon at all | rejected |
+  | genuine reason | ACCEPTED, reason correct |
+
+  So the only shape the gate rejects is a marker with no colon. **Every annotation in this
+  repository today carries a real reason, so nothing is currently wrong** — but the property
+  the check advertises is not the property it enforces, which is this document's most-recorded
+  gate failure mode: a control that appears to act and does not. M2 confirmed the surrounding
+  machinery is sound — deleting the annotation entirely put the function in the unexplained
+  list and failed correctly — so the defect is precisely and only in the reason-extraction
+  regex.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
