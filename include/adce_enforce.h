@@ -16,9 +16,20 @@ extern "C" {
  * Enforcement Plane. Reads what the Observation Plane publishes and decides
  * drop or admit, per arrival, on the ingress thread.
  *
- * Integer arithmetic only. adce_rng_next_unit() and every floating-point
- * operation are confined to the Observation Plane by the convention locked at
- * adce_platform.h:381-387; nothing in this header computes in double.
+ * THE RNG LANE, stated here because this is the plane it binds. The Ingest and
+ * Enforcement planes drive stochastic drop decisions from adce_rng_next() and
+ * INTEGER COMPARISONS ONLY. That is not a style preference and not a
+ * prohibition on a type: it is what makes a verdict exactly reproducible from a
+ * recorded draw -- replay the draw, replay the decision, bit for bit -- which
+ * is what section 5 of docs/enforcement-plane.md is built on.
+ *
+ * The rule used to be stated in include/adce_platform.h, on adce_rng_next_unit(),
+ * a function whose only recorded purpose was to be excluded from this plane. It
+ * was removed; the requirement outlived it because the requirement was never
+ * about that function. Do not restate this as "no floating point here": that
+ * drops the positive half and the reason, and reads as contradicted by the
+ * Observation Plane, which ships 15 double tokens and which this rule does not
+ * govern.
  *
  * Concurrency contract: adce_epoch_state_t is the only shared object and this
  * plane only ever READS it. Everything this plane writes lives in a

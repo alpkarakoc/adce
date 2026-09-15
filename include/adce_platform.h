@@ -509,14 +509,6 @@ static inline uint64_t adce_rng_next(void) {
     return result;
 }
 
-/* Uniform double in [0, 1) built from the top 53 mantissa bits. Confined to
- * the Observation Plane by convention: the Ingest/Enforcement planes must
- * drive stochastic drop decisions from adce_rng_next() and integer
- * comparisons only. */
-static inline double adce_rng_next_unit(void) {
-    return (double)(adce_rng_next() >> 11) * (1.0 / 9007199254740992.0);
-}
-
 /* ===========================================================================
  * Wait-free, single-cache-line Seqlock transport. No mutexes, no spinlocks,
  * no allocation. A single writer publishes; any number of readers retry
