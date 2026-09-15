@@ -139,7 +139,21 @@ def annotation(h, line):
 
     Walks upward from the declaration over blank and comment lines only, and
     stops at the first line that is neither. So a marker attached to some other
-    declaration further up cannot be borrowed by this one."""
+    declaration further up cannot be borrowed by this one.
+
+    Returns None when there is no marker, "" when there is a marker but no
+    reason, and the reason otherwise. The three are distinct because they need
+    different messages: a missing marker is an unanswered question, an empty one
+    is the token-to-paste this check exists to refuse.
+
+    THE REASON MUST BE ON THE MARKER'S OWN LINE. The predicate was
+    `MARK \\s*:\\s*(\\S[^\\n]*)` over the joined block, and `\\s*` after the colon
+    matches NEWLINES -- so the capture walked to the next non-space character
+    anywhere below the marker and returned it as the reason. A bare marker sitting
+    above the block's own terminator was accepted with `*/` as its reason; above
+    an unrelated sentence, that sentence became the reason. The check verified
+    that a colon was present, not that a reason existed, while its own guidance
+    said a bare marker would make this a token to paste."""
     lines = h.read_text().split("\n")
     block, i = [], line - 1
     while i >= 0:
@@ -149,10 +163,19 @@ def annotation(h, line):
             block.append(lines[i]); i -= 1
         else:
             break
-    m = re.search(MARK + r'\s*:\s*(\S[^\n]*)', "\n".join(reversed(block)))
-    return m.group(1).strip() if m else None
+    for text in reversed(block):
+        m = re.search(MARK + r'[ \t]*:(.*)$', text)
+        if m is None:
+            continue
+        reason = re.sub(r'\*/\s*$', '', m.group(1)).strip()
+        # Comment punctuation is not a reason. This is what catches `*/`, `*`,
+        # and a line that trails off into the block's own syntax.
+        if re.fullmatch(r'[*/\s]*', reason):
+            return ""
+        return reason
+    return None
 
-bad, annotated, live = [], [], 0
+bad, empty, annotated, live = [], [], [], 0
 for name, (h, line) in sorted(found.items()):
     if calls(hdrs, name) + calls(srcs, name) > 0:
         live += 1
@@ -160,18 +183,42 @@ for name, (h, line) in sorted(found.items()):
     reason = annotation(h, line)
     if reason:
         annotated.append((name, h.name, reason))
+    elif reason == "":
+        empty.append((name, h.name, line + 1))
     else:
         bad.append((name, h.name, line + 1))
 
 print(f"include/ functions: {len(found)}  |  with a shipping caller: {live}"
-      f"  |  annotated: {len(annotated)}  |  UNEXPLAINED: {len(bad)}")
+      f"  |  annotated: {len(annotated)}  |  UNEXPLAINED: {len(bad)}"
+      f"  |  MARKER WITHOUT REASON: {len(empty)}")
 if annotated:
     print(f"\n{MARK} (declared, not defects):")
     for n, f, r in annotated:
         print(f"  {n:26} {f:18} {r}")
-if not bad:
+if empty:
+    print(f"\nFAIL: {len(empty)} function(s) carry {MARK} with NO REASON:\n",
+          file=sys.stderr)
+    for n, f, ln in empty:
+        print(f"  {f}:{ln}  {n}", file=sys.stderr)
+    print(f"""
+The marker is present and the reason is not. A bare marker is a token to paste:
+it clears this check without answering the question the check asks, which is
+WHY a published function has no caller inside the library.
+
+The reason must be on the MARKER'S OWN LINE and must be more than comment
+syntax -- `*/`, `*` and a blank remainder are all rejected. Write it as
+
+    /* {MARK}: called by consumer ingress
+     * sites, never from inside the library -- see the recipe in README.md. */
+
+Continuation lines are fine; the first line is what must carry the reason.""",
+          file=sys.stderr)
+
+if not bad and not empty:
     print("\nOK: every function in include/ either has a shipping caller or says why not.")
     sys.exit(0)
+if not bad:
+    sys.exit(1)
 
 print(f"\nFAIL: {len(bad)} function(s) in include/ have ZERO call sites in", file=sys.stderr)
 print("      include/ or src/, and carry no annotation:\n", file=sys.stderr)
