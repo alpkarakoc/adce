@@ -2815,10 +2815,33 @@ looking.
       function; filed because the CLASS is what matters and this instance names a new
       sub-shape of it.
 
-- **GATE DEFECT FOUND IN PASSING: `check-internal-use.sh` ACCEPTS A BARE MARKER, which its own
-  error text says it must not.** Found by mutation M1 on 2026-09-15, written here this turn
-  and to be fixed in a later pull request of its own, per the standing rule that a gate change
-  lands separately from the work that found it.
+- **GATE DEFECT, FILED 2026-09-15 AND FIXED 2026-09-16: `check-internal-use.sh` ACCEPTED A
+  BARE MARKER, which its own error text says it must not.** Found by mutation M1 during #42,
+  filed rather than repaired there, and repaired in its own pull request per the standing rule
+  that a gate change lands separately from the work that found it. Kept with its resolution
+  rather than deleted.
+
+  **THE RESOLUTION.** `annotation()` now scans the comment block LINE BY LINE and takes only
+  the remainder of the marker's own line, strips a same-line `*/`, and rejects a remainder
+  that is nothing but comment punctuation. It returns three states rather than two — `None`
+  for no marker, `""` for a marker with no reason, the reason otherwise — because those need
+  different messages: a missing marker is an unanswered question, an empty one is the
+  token-to-paste the check exists to refuse, and reporting the second as "carries no
+  annotation" would misdescribe it. The output gained a `MARKER WITHOUT REASON` column and a
+  separate FAIL block naming the function, file and line.
+
+  **THE DEFECT WAS LATENT, NOT ACTIVE, and that is a negative result worth recording.** All
+  fifteen existing annotations were re-checked under the repaired predicate. All fifteen pass,
+  and every printed reason is real prose identical to what it printed before. **None was
+  passing on a colon rather than on a reason**, so no annotation in this repository was ever
+  holding a red shut with an empty marker — including the two #42 itself added while the
+  defect was live. A repaired gate that passes fifteen unexamined annotations would have
+  established nothing; the re-check is what turns that into a statement.
+
+  **What the gate ran on, and for how long.** It was in this condition on `main` for the life
+  of #42 — the pull request that both found the defect and added two annotations through it.
+
+  *(the defect as originally recorded)*
 
   The check's own guidance reads: *"The reason is required. A bare marker would make this a
   token to paste."* M1 stripped the reason text from the new annotation, leaving
