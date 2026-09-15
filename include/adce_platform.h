@@ -655,7 +655,22 @@ static inline int adce_epoch_read(const adce_epoch_state_t *state,
  * conservative posture, and this function is not the only place one is taken.
  * A torn adce_epoch_read returns 0, and the gate treats no-snapshot as stale
  * without consulting this function at all. All three routes are enumerated in
- * docs/enforcement-plane.md section 4. */
+ * docs/enforcement-plane.md section 4.
+ *
+ * ADCE_PUBLIC_NO_INTERNAL_USER: the consumer-side companion to adce_epoch_read.
+ * That reader is public, so a consumer may read the epoch itself rather than
+ * through adce_enf_decide -- and a consumer that does needs a staleness
+ * predicate. Hand-rolling one loses the FUTURE case: a signed difference, a
+ * saturating guard, or an explicit observed_at_ns > now_ns branch returning 0
+ * all report a publication from the future as FRESH, which flips fail-closed to
+ * fail-OPEN on the one axis the Enforcement Plane may never fail open on. The
+ * unsigned wrap below is what prevents that, and publishing the reader without
+ * publishing this predicate would ship the trap and withhold the guard.
+ *
+ * Zero shipping callers is therefore the design and not decay. The library does
+ * not call it because adce_enf_classify_stale computes strictly more on the path
+ * the gate takes -- three routes rather than one bit -- so a consumer wanting
+ * only the bit uses this, and the gate wanting the route uses the classifier. */
 static inline int adce_epoch_is_stale(uint64_t observed_at_ns, uint64_t now_ns) {
     return (now_ns - observed_at_ns) > ADCE_ADVICE_TIMEOUT_NS;
 }
