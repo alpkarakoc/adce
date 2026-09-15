@@ -11,12 +11,25 @@ means.
 
 Three are locked and this design is written inside them, not around them.
 
-- **The RNG lane is already decided.** `adce_platform.h` says of `adce_rng_next_unit()`:
-  *"Confined to the Observation Plane by convention: the Ingest/Enforcement planes must
-  drive stochastic drop decisions from `adce_rng_next()` and integer comparisons only."*
-  So the drop decision is integer arithmetic on a raw 64-bit draw. No double appears
-  anywhere in this plane. This is not a limitation to work around — it is what makes the
-  decision exactly reproducible from a recorded draw, which section 5 depends on.
+- **The RNG lane is already decided.** `include/adce_enforce.h` states it, in the plane it
+  binds: *"The Ingest and Enforcement planes drive stochastic drop decisions from
+  `adce_rng_next()` and INTEGER COMPARISONS ONLY."* So the drop decision is integer
+  arithmetic on a raw 64-bit draw. This is not a limitation to work around — it is what
+  makes the decision exactly reproducible from a recorded draw, which section 5 depends on.
+
+  **LOCKED TEXT CHANGED, and this note exists so the change is not silent.** This constraint
+  previously quoted a comment on `adce_rng_next_unit()` in `adce_platform.h`. That function
+  was removed as an API decision, so the quotation would have pointed at nothing. The rule
+  moved to the Enforcement Plane header rather than being deleted with the function, because
+  the requirement was never about the function: it is about the plane boundary and the
+  reproducibility it buys.
+
+  "No double appears anywhere in this plane" was asserted here and is now **CHECKED: zero
+  `double` tokens in `include/adce_enforce.h`, comments and string literals stripped.** A
+  verified zero and an asserted zero read identically on the page and are not the same
+  evidence, which is why the difference is written down. The same count puts 15 `double`
+  tokens in the Observation Plane — that plane does floating-point work legitimately, and a
+  rule phrased as a bare type prohibition would read as contradicted by it.
 - **`adce_rng_tls` is one stream per translation unit, per thread.** It is declared
   `static _Thread_local` at file scope in a header, so every TU that includes the header
   gets its own copy, each seeded independently from the kernel. Verified by taking its
@@ -62,7 +75,9 @@ drops everything — and both are exact rather than off by one bucket.
 **Why the top 16 bits and not the low ones.** xorshift128+ is weakest in its low bits; its
 lowest bit is a pure LFSR sequence and fails linear-complexity tests. The high bits carry
 the addition's carry propagation and are the ones the generator's authors intend for use.
-`adce_rng_next_unit()` already takes the top 53 for the same reason. Taking `draw & 0xFFFF`
+The same reasoning is why a unit-double conversion of this generator would take its top 53
+bits rather than its bottom 53 — the property belongs to xorshift128+, not to any particular
+consumer of it. Taking `draw & 0xFFFF`
 instead would bias the containment decision in a way no test of the *fraction* would
 detect, because the fraction would still be right — only its independence across draws
 would be wrong.

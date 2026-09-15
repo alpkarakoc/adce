@@ -183,11 +183,6 @@ static int test_rng(void) {
     ADCE_TEST_ASSERT(a != b || b != c);
     ADCE_TEST_ASSERT(adce_rng_tls.initialized == 1);
 
-    for (int i = 0; i < 10000; ++i) {
-        double u = adce_rng_next_unit();
-        ADCE_TEST_ASSERT(u >= 0.0 && u < 1.0);
-    }
-
     return 0;
 }
 
