@@ -239,6 +239,11 @@ looking.
   by hand, and it is the concrete case for the three-way live / test-only / dead refinement
   rather than an argument for it. That refinement is NOT started here.
 
+  **MEASURED, AND THE REFINEMENT IS NOT WORTH BUILDING. The three-way split has ZERO
+  discriminating power on the population it was proposed for.** See the entry below; the
+  short version is that `dead` is EMPTY and `test-only` contains all fourteen annotated
+  functions, consumer entry points included.
+
   **This is the third instance of one class in as many tasks**, and the class is now worth
   naming as a habit rather than as an incident: `adce_epoch_is_stale`, the `__int128` legs,
   and `adce_rng_next_unit` are all prose that names a real function, describes its behaviour
@@ -272,6 +277,107 @@ looking.
   window closes with the reds still standing, this stops being a transitional cost and
   becomes a standing one, which is a fact the window's review should weigh.
 
+- **THE LIVE / TEST-ONLY / DEAD POPULATION, MEASURED — and the refinement it was proposed
+  for is NOT worth building.** A negative result, and the pre-registered threshold and the
+  pre-registered coherence check disagree, which is itself the finding.
+
+  **METHOD, because the method is what makes these numbers and not the earlier ones.**
+  `scripts/measure-call-population.sh` copies `check-internal-use.sh`'s parser — `strip()`,
+  `DEF`, `DECL`, `calls()`, `annotation()` — VERBATIM, verified byte-identical
+  mechanically. The only difference between the shipping and test columns is which
+  directory is handed to `calls()`. Earlier sample counts in this document were
+  hand-written greps that counted declarations and definitions as calls; they were
+  testimony and are superseded. Anti-vacuity: the copy reproduces the gate's own published
+  40 / 24 / 14 exactly.
+
+  **THE COUNTS, BEFORE ANY INTERPRETATION.**
+
+  | class | definition | n |
+  |---|---|---|
+  | live | shipping callers > 0 | **24** |
+  | test-only | shipping == 0, test > 0 | **16** |
+  | dead | both zero | **0** |
+  | | total functions in `include/` | **40** |
+
+  **All fourteen annotated functions are test-only. None is live. None is dead.** Both
+  unannotated reds are test-only too: `adce_epoch_is_stale` at 0 shipping / 14 test, and
+  `adce_rng_next_unit` at 0 / 1. So every one of the sixteen zero-shipping functions has at
+  least one test caller, and **the `dead` class is empty across the whole surface.**
+
+  **THE ONE-SHIPPING-CALLER SUB-POPULATION IS NOT A HANDFUL. IT IS THE LIVE COLUMN.**
+  **20 of the 24 live functions have exactly ONE shipping call site.** Only four have more:
+  `adce_now_ns` (3), `adce_obs_pressure_clamp` (3), `adce_rng_next` (3), `adce_obs_drain`
+  (2). `adce_epoch_publish` and `adce_epoch_read` were named in the internal-use entry as
+  sitting one refactor from zero; they are not exceptional, they are typical. Several carry
+  heavy test coverage on top of that single edge — `adce_enf_decide` at 1 shipping / 26
+  test, `adce_epoch_publish` at 1 / 20, `adce_epoch_read` at 1 / 18 — which is the
+  `adce_epoch_is_stale` shape with the last shipping edge still attached.
+
+  **SECTION 5'S QUESTION, WHICH IS THE DECISIVE ONE: YES, `adce_obs_tap` IS MISCLASSIFIED.**
+  It is the Observation Plane's per-arrival consumer entry point, it has **0 shipping and 8
+  test callers**, and the three-way split files it under `test-only` — the same class as
+  `adce_epoch_is_stale`, the superseded predicate the whole check was built to surface.
+
+  It is not one awkward case. **Every consumer entry point lands there:**
+
+  | function | shipping | test | class |
+  |---|---|---|---|
+  | `adce_obs_tap` — per-arrival entry point | 0 | 8 | test-only |
+  | `adce_enf_admit` — the gate itself | 0 | 5 | test-only |
+  | `adce_enf_thread_init` — per-thread setup | 0 | 7 | test-only |
+  | `adce_obs_thread_start` — observer startup | 0 | 2 | test-only |
+  | `adce_epoch_is_stale` — **superseded, the reason the gate exists** | 0 | **14** | test-only |
+
+  **And the test-call count does not even order them.** The suspected-dead function has 14
+  test callers — nearly double the genuine entry point's 8 — so no threshold on that column
+  separates the two either. Whatever the refinement reported, an ANNOTATION would still be
+  required to say which kind of test-only a function is, and that annotation is exactly what
+  the gate already demands today.
+
+  **THE TWO PRE-REGISTERED CRITERIA DISAGREE, and that has to be said rather than resolved
+  by preference.** The threshold was set in advance: 1 of 14 test-only means not worth a
+  gate, 5 of 14 means worth one. The measurement is **14 of 14**, far above the line, so the
+  COUNT says build it. The coherence check, registered at the same time, says the opposite.
+
+  The coherence check wins, and the reason is not that it is preferred — it is that
+  **14 of 14 FALSIFIES THE PREMISE THE THRESHOLD WAS BUILT ON.** That threshold assumed
+  `test-only` would isolate a SUSPICIOUS MINORITY of the annotated set, so that a large
+  count would mean a large suspicious population. Instead the class contains 100% of it. A
+  category that holds every member of the set it partitions has no discriminating power, and
+  a count over a category with no discriminating power is not evidence of anything. The
+  number cleared the bar by being the one value that shows the bar was measuring the wrong
+  thing.
+
+  **Stated as plainly as it can be: with `dead` empty at 0 of 40, the three-way split is a
+  TWO-way split wearing a third label.** It partitions `include/` at exactly the line
+  `shipping > 0` already partitions it. It would relabel, not refine.
+
+  **DECISION: do not build it.** Not deferred, not blocked on a budget — the measurement
+  says there is nothing to buy. What WOULD change this is a function appearing with zero
+  shipping AND zero test callers, which would make `dead` non-empty and give the third class
+  something only it can hold. There are none today, and this entry is the record of that
+  being checked rather than assumed. Re-run `scripts/measure-call-population.sh` before
+  reopening the question.
+
+  **What the measurement leaves standing.** The blind spot recorded in the `__int128`
+  re-derivation is real and is NOT closed by this: `adce_q16_mul` and `adce_q16_div` are
+  annotated-green while contributing nothing to a locked decision that names them. The
+  measurement's contribution is to show that the three-way split is not the instrument that
+  would catch it — both are test-only, and so is every legitimate entry point beside them.
+  Whatever eventually catches that class will have to read the justification against the
+  call graph, which is prose evaluated against code, and this document already records why
+  no predicate over text reaches it.
+
+  **ONE PARSER LIMITATION, found while spot-checking and present in the GATE too.**
+  `adce_platform_get_entropy` is credited with one shipping call site by line 155 of
+  `adce_platform.h` — its OWN macro definition,
+  `#define ADCE_GET_ENTROPY(buf, len) adce_platform_get_entropy((buf), (len))` — while its
+  real call site, `ADCE_GET_ENTROPY(buf, sizeof(buf))` at line 477, is invisible to a
+  predicate that matches the function's name. The classification `live` is correct and is
+  credited for the wrong reason. It is the ONLY macro in `include/` that expands to an
+  `adce_` function, checked rather than assumed, so exactly one function is affected and no
+  classification changes. Recorded because the same artefact is in the live gate, where a
+  future macro-mediated call would read as zero shipping callers and fire the check.
 - The shipping target builds and its tests pass under GCC 14 on linux/arm64 and
   linux/amd64 (`scripts/verify-linux-gcc.sh`). GCC's `__int128` pedwarn under `-pedantic`
   is resolved by `__extension__` on the two typedefs, with every use routed through them:
