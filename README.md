@@ -415,3 +415,7 @@ draws from, silently. Every enforcement function reachable from a test takes its
 nondeterminism as a parameter — `now_ns` and the RNG `draw` — for the same reason: a test
 translation unit cannot observe or seed the stream an enforcement translation unit uses. That
 is structural, not stylistic.
+
+## License
+
+Apache License 2.0. The terms and the copyright notice are in [`LICENSE`](LICENSE).
