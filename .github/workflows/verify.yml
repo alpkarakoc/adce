@@ -463,8 +463,8 @@ jobs:
   # ===========================================================================
   # THE CONTENDED-TAP MEASUREMENT. Entry (1) of CLAUDE.md's unverified list.
   #
-  # WHY IT IS HERE RATHER THAN IN verify.sh. The per-edit gate is 48 cases in
-  # about five seconds, and CLAUDE.md records that a latency threshold on a
+  # WHY IT IS HERE RATHER THAN IN verify.sh. The per-edit gate has to stay fast,
+  # and CLAUDE.md records that a latency threshold on a
   # shared runner is a flake generator. This job ASSERTS NOTHING. It prints
   # samples and a summary, in the shape t_adce_latency.c established: measured,
   # never asserted, with every figure carrying its n.

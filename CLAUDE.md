@@ -933,8 +933,10 @@ looking.
 
   **What changed on 2026-09-06, before the entries.** The list was last written at
   `4b83276` (#9). Its entry (1) said `test/t_adce_loop.c` does not exist and that
-  closed-loop evidence is ZERO in either direction. That file is on `main` at **2164
-  lines** with **thirteen** registered cases, and the statement is now false. (It read
+  closed-loop evidence is ZERO in either direction. That file was on `main` at **2164
+  lines** with **thirteen** registered cases as of #23 (2026-09-10), and the statement is
+  now false. (The line count is DATED, not current: #38 took the file to 2171 on
+  2026-09-14 without adding a case. See the README case-count entry. It read
   "2008 lines" and "twelve" until this commit -- stale since #20, which is instance 3 of
   the scope gap recorded above.) Stale in the
   UNDER-claiming direction is still stale: it understates what is covered and so misdirects
@@ -2814,6 +2816,115 @@ looking.
       above and found in the same turn. NOT FIXED because the clause is gone with the
       function; filed because the CLASS is what matters and this instance names a new
       sub-shape of it.
+
+- **THE README CASE COUNT WAS AN UNGATED COPY OF A GATED QUANTITY, AND IT DRIFTED BY FOUR.
+  STALE, NOT NEVER-TRUE.** Removed on 2026-09-24 rather than corrected, along with two more
+  copies in comments.
+
+  README said "48 cases". `verify.sh`'s own extraction,
+  `sed -n 's/^static int test_\([A-Za-z0-9_]*\)(void).*/\1/p'` over `test/t_*.c`, gives
+  **52**: 11 / 6 / 1 / 13 / 11 / 10 across enforce, harness, latency, loop, observe and
+  platform. No duplicate names. The runner table has 52 entries. PR #43's
+  "156 `TEST OK`" is 3 × 52 by construction, not by coincidence: all three profiles compile
+  the same `SRCS`, the runner is an unconditional loop over one static table, the only
+  sanitizer `#if` in `test/` picks a label string in `t_adce_latency.c`, and PR CI runs
+  `ADCE_REPEAT=1`.
+
+  **The unit was derived before the number, and it was NOT ambiguous.** "Case" does have two
+  meanings in this repository. `t_adce_loop.c` numbers six design cases ("Case 1" to
+  "Case 6", from `docs/closed-loop-harness.md` §5) across thirteen test functions. But
+  README's sentence binds its own unit in the next clause: `verify.sh` reads "the expected
+  set out of the source — every `static int test_<name>(void)` definition". There are no
+  non-`static` `test_` definitions, so `^int test_` adds nothing. Two further checks hold.
+  First, 48 matches no other counting rule: the population under that one rule was exactly
+  48 at `ecbf59d`, the commit that wrote it. Second, the Layout row's "13 cases" is
+  test-function units too; under the design-case numbering it would be 6. So 48 and 52 are
+  the same population at different commits, not two true figures for two populations.
+  Removing both counts also takes away the one place a reader could confuse the two senses.
+
+  **The advisor's figures were CORRECT this time**: 48 in README, 52 in source, 156 / 3.
+  That is recorded at the same weight as the fifteen refutations, because a streak of
+  refutations is evidence about a process, not a rule that the next figure is wrong. All
+  three were re-derived rather than taken on trust.
+
+  **`git log -S` on the README line cannot date the staleness on its own.** It returns only
+  `ecbf59d`, when the figure was written. The line never changed afterwards; the suite
+  changed underneath it. A stale restatement is invisible to a history search over the
+  restatement. Dating it needs the population counted at every commit, which is what the
+  table below does. The last correct tree was `b991d53` (#35, 2026-09-12 20:02:00 +0300),
+  and the first wrong one was `3e797ef` (#34), merged **eight seconds later**. The figure
+  has been wrong for about eleven and a half days as of 2026-09-24.
+
+  **Stale, and the history is clean enough to date to the commit.** Counted with that same
+  extraction at every commit from #22 onward:
+
+  | commit | date | population | cause |
+  |---|---|---|---|
+  | `ecbf59d` (#22) | 2026-09-10 | **48**, the README written | — |
+  | `73eff8f` (#33) | 2026-09-12 | 48, two comment copies written | — |
+  | `3e797ef` (#34) | 2026-09-12 | 49 | `platform_entropy` |
+  | `f9ce1bc` (#36) | 2026-09-13 | 50 | `seqlock_retry_constructed` |
+  | `6b14c27` (#38) | 2026-09-14 | 52 | `obs_drain_covers_claimed`, `obs_claim_capacity` |
+
+  So the figure was true for about two and a half days and false for about eleven and a
+  half. Three pull requests moved it and none of them touched the README. Each one added a
+  case, which is the most ordinary change this repository makes. That is gap one's mechanism
+  ("the commit that moves the boundary and the commit that records the move are in different
+  pull requests") in its simplest form. It is also the opposite of the D4 refutation and the
+  vacuous confinement clause, which were never true of any tree. This one had a commit where
+  it was right, so it belongs with the cadence failures rather than the derivation ones.
+
+  **There were three copies, not one.** `bench/tap_contention.c` and the contended-tap
+  comment in `.github/workflows/verify.yml` both said "the per-edit gate is 48 cases in about
+  five seconds". Both came from #33, when 48 was still true, and both went stale with the
+  README. "About five seconds" was never measured in either place. Both are removed in their
+  own commit, and the workflow change is shown to be comment-only because the parsed YAML is
+  identical before and after.
+
+  **The repair was removal, and the rejected option has a measured cost.** Changing 48 to 52
+  is correct today. The population has since moved three times in five days, and each move
+  would re-stale the page silently. `verify.sh` already owns this quantity and gates every
+  name in it, so a README copy adds nothing a reader cannot get from
+  `grep -c '^static int test_' test/*.c`, and it is the only copy that can rot. The sentence
+  now keeps what was informative (the set is read from source, so an unwired case turns the
+  gate red) and says why no count follows.
+
+  **The Layout table's one number was removed too, while it was still correct.** Only one
+  row carried a count ("the closed-loop rig: 13 cases"), and 13 has been true since #20. It
+  is correct because `t_adce_loop.c` has not gained a case since, not because anything checks
+  it. The #38 diff shows that file does get edited (+7 lines, no case), so being correct so
+  far says nothing about the next edit. The row's description already tells a reader what the
+  file is for, and a count alone in a table where no other row has one reads as significant
+  when it is not. Kept numbers are worth their upkeep only when they carry information the
+  gate does not already hold, and this one does not.
+
+  **Found by a reader counting, which is the only detector this class has. Measured against
+  the printed-universal audit, it is evidence about that audit's UNDER-fire direction.** None
+  of the four stale lines matches `\b(always|never|every|exactly|invariably)\b`: zero hits
+  across README 250, README 406, `bench/tap_contention.c` 123 and `verify.yml` 466. A bare
+  count claims "exactly N" without the word, just as the near-miss range left out its n, so
+  no pattern in that family reaches it. The audit also covered only this document, and all
+  three copies were outside it. That is two independent misses on the same instance, the same
+  shape as that audit's fault one. It strengthens the case for a review rule over a grep gate
+  rather than weakening it.
+
+  **No gate is filed.** After removal a README-versus-suite comparison has nothing left to
+  compare. A general "no case counts in prose" grep hits this document's dated run records
+  ("all 30 cases green" in run 33746269305, the case-table rows), which are branch 2 and
+  correct, so it would repeat the 66-to-0 ratio at a smaller scale. The durable repair is
+  the branch-3 one already applied: a quantity the gate owns is not restated where nothing
+  gates it.
+
+  **One more stale figure, found while dating this one.** The unverified list's preamble
+  said `t_adce_loop.c` "is on `main` at 2164 lines". That was true at #23 and has been 2171
+  since #38. It is corrected in place by dating it, not by updating the number.
+
+  **No mutation proof applies.** This changes prose that nothing gates. The claim is stated
+  plainly rather than backed by a constructed red that would test nothing.
+
+  **Not claimed:** an ordinal. The brief that opened this work counted nine earlier
+  prose-defect instances. That count was not re-derived here, so this entry does not call
+  itself the tenth.
 
 - **GATE DEFECT, FILED 2026-09-15 AND FIXED 2026-09-16: `check-internal-use.sh` ACCEPTED A
   BARE MARKER, which its own error text says it must not.** Found by mutation M1 during #42,
