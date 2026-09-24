@@ -247,9 +247,11 @@ direction.
 
 ## What is asserted
 
-48 cases, run under three profiles. `scripts/verify.sh` reads the expected set out of the
+Every case runs under three profiles. `scripts/verify.sh` reads the expected set out of the
 **source** — every `static int test_<name>(void)` definition — not out of the binary, so a
-case that compiles but is never wired into the runner table turns the gate red.
+case that compiles but is never wired into the runner table turns the gate red. The count is
+deliberately not written here: the gate derives the set from source on every run, and a copy
+on this page would be the one place it could go stale without anything turning red.
 
 | claim | assertion |
 |---|---|
@@ -403,7 +405,7 @@ that ran against a branch behind `main`.
 | `include/adce_obs_thread.h`, `src/adce_obs_thread.c` | epoch cadence and writer ownership; optional |
 | `include/adce_enforce.h` | the **entire** Enforcement Plane, inline, with no `.c` file |
 | `test/t_adce_platform.c` | `main()` and the single runner table |
-| `test/t_adce_loop.c` | the closed-loop rig: 13 cases |
+| `test/t_adce_loop.c` | the closed-loop rig |
 | `test/t_adce_harness.c` | the integration harness; the only file testing a call *order* |
 | `test/t_adce_latency.c` | per-arrival cost, measured and never asserted |
 | `docs/` | three design documents, each written before the code it describes |
