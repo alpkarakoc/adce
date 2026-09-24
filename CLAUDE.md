@@ -2804,6 +2804,10 @@ looking.
      is a decision about the project's obligations to users, not a repair, and it should not
      be drafted inside the pull request that makes it visible.
 
+     **STILL OPEN as of 2026-09-24.** The LICENSING obligation was decided that day (entry
+     below). This one was not, and the license does not answer it: Apache-2.0 grants rights
+     to the code as it is and promises nothing about the next version.
+
   10. **The vacuous confinement clause, per Decision 3.** `adce_rng_next_unit`'s comment said
       it was "confined to the Observation Plane by convention" while the Observation Plane
       never called it. Every word was true of the function; the sentence was false about the
@@ -2869,6 +2873,58 @@ looking.
   machinery is sound — deleting the annotation entirely put the function in the unexplained
   list and failed correctly — so the defect is precisely and only in the reason-extraction
   regex.
+
+- **DECIDED 2026-09-24: the repository is licensed under Apache-2.0. It is one of two
+  obligations to consumers. The other, API stability (filed item 9), is STILL OPEN.** The
+  two are recorded together because they are easy to mistake for one. A license says what a
+  consumer may DO with the code they have. A stability policy says what they may RELY ON in
+  the code they have not received yet. Deciding the first says nothing about the second.
+
+  **Why Apache-2.0.** ADCE's consumers are low-latency infrastructure teams whose legal
+  review treats MIT's silence on patents as a risk. Apache-2.0's explicit patent grant
+  removes that objection. The cost is NOTICE mechanics, which are near-zero for a
+  single-author library. **Why it was decided now:** the author is the sole copyright
+  holder, so the choice can be made or changed freely today. That stops being true once
+  external contributors exist.
+
+  **What the ground truth found. It was an ABSENCE, not a false claim.** Every match for
+  `licen` across the tree is the English verb ("license the word", "licenses the compiler",
+  "licenses using it as"). No file claimed a license the repository did not have. What the
+  record did not say was that the repository was PUBLIC with `licenseInfo: null` from
+  2026-09-01 to this commit, so the code was visible with no grant to use it. That was
+  unrecorded, not misrecorded.
+
+  **The text is verified, not recalled.** `LICENSE` is apache.org's `LICENSE-2.0.txt`,
+  sha256 `cfc7749b…3d30`. Fourteen independently vendored copies on the authoring machine
+  matched it. The only line that differs is line 190, the APPENDIX's
+  `Copyright [yyyy] [name of copyright owner]`, now `Copyright 2026 Alp Giray Karakoç`. That
+  line comes after `END OF TERMS AND CONDITIONS` (line 177), and the appendix's own text says
+  to replace those bracketed fields. "The body is never edited" and "the copyright line is
+  filled" therefore do not conflict. The terms are byte-identical, and `diff` shows it.
+
+  **The holder's name was asked for, not derived.** Git records only `Alp` and the handle
+  `alpkarakoc`. Reading a surname out of a handle would have been a guess, and a copyright
+  line is not the place for one.
+
+  **The README states the license and links the file. It does not repeat the holder or the
+  year.** A copy there would be an unchecked duplicate of what `LICENSE` holds, which is the
+  same shape as the README case count that #44 removes (#44 was still open when this was
+  written). `LICENSE` is the only copy.
+
+  **No NOTICE file.** Apache-2.0 does not require one and there is nothing to attribute. If
+  vendored third-party code ever arrives, the NOTICE mechanics become real work.
+
+  **No mutation proof applies.** Nothing gates a license file. A constructed red over it
+  would be a control that appears to act and does not, which this document ranks worst.
+
+  11. **FILED, NOT DONE: SPDX identifiers in source headers.** Recommended, and the reason is
+      specific to this library's shape, not general hygiene. `adce_platform.h` and
+      `adce_enforce.h` are header-only by design, and a header-only library gets VENDORED:
+      consumers copy one header into their own tree. A copied header loses its repository,
+      and with it the `LICENSE` file. `SPDX-License-Identifier: Apache-2.0` travels with the
+      file. It touches every shipping translation unit, and it needs its own decision on
+      scope (headers only, or `src/`, `test/`, `bench/` and scripts too), so it belongs in its
+      own pull request.
 
 - Rounding is toward negative infinity across the whole Q16 lane. `adce_q16_to_int`
   floors via its arithmetic right shift, and `adce_q16_div` floors by stepping the
