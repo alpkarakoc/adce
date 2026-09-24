@@ -2830,6 +2830,31 @@ looking.
   sanitizer `#if` in `test/` picks a label string in `t_adce_latency.c`, and PR CI runs
   `ADCE_REPEAT=1`.
 
+  **The unit was derived before the number, and it was NOT ambiguous.** "Case" does have two
+  meanings in this repository. `t_adce_loop.c` numbers six design cases ("Case 1" to
+  "Case 6", from `docs/closed-loop-harness.md` §5) across thirteen test functions. But
+  README's sentence binds its own unit in the next clause: `verify.sh` reads "the expected
+  set out of the source — every `static int test_<name>(void)` definition". There are no
+  non-`static` `test_` definitions, so `^int test_` adds nothing. Two further checks hold.
+  First, 48 matches no other counting rule: the population under that one rule was exactly
+  48 at `ecbf59d`, the commit that wrote it. Second, the Layout row's "13 cases" is
+  test-function units too; under the design-case numbering it would be 6. So 48 and 52 are
+  the same population at different commits, not two true figures for two populations.
+  Removing both counts also takes away the one place a reader could confuse the two senses.
+
+  **The advisor's figures were CORRECT this time**: 48 in README, 52 in source, 156 / 3.
+  That is recorded at the same weight as the fifteen refutations, because a streak of
+  refutations is evidence about a process, not a rule that the next figure is wrong. All
+  three were re-derived rather than taken on trust.
+
+  **`git log -S` on the README line cannot date the staleness on its own.** It returns only
+  `ecbf59d`, when the figure was written. The line never changed afterwards; the suite
+  changed underneath it. A stale restatement is invisible to a history search over the
+  restatement. Dating it needs the population counted at every commit, which is what the
+  table below does. The last correct tree was `b991d53` (#35, 2026-09-12 20:02:00 +0300),
+  and the first wrong one was `3e797ef` (#34), merged **eight seconds later**. The figure
+  has been wrong for about eleven and a half days as of 2026-09-24.
+
   **Stale, and the history is clean enough to date to the commit.** Counted with that same
   extraction at every commit from #22 onward:
 
@@ -2841,13 +2866,13 @@ looking.
   | `f9ce1bc` (#36) | 2026-09-13 | 50 | `seqlock_retry_constructed` |
   | `6b14c27` (#38) | 2026-09-14 | 52 | `obs_drain_covers_claimed`, `obs_claim_capacity` |
 
-  So the figure was true for about two and a half days and false for twelve. Three pull
-  requests moved it and none of them touched the README. Each one added a case, which is the
-  most ordinary change this repository makes. That is gap one's mechanism ("the commit that
-  moves the boundary and the commit that records the move are in different pull requests")
-  in its simplest form. It is also the opposite of the D4 refutation and the vacuous
-  confinement clause, which were never true of any tree. This one had a commit where it was
-  right, so it belongs with the cadence failures rather than the derivation ones.
+  So the figure was true for about two and a half days and false for about eleven and a
+  half. Three pull requests moved it and none of them touched the README. Each one added a
+  case, which is the most ordinary change this repository makes. That is gap one's mechanism
+  ("the commit that moves the boundary and the commit that records the move are in different
+  pull requests") in its simplest form. It is also the opposite of the D4 refutation and the
+  vacuous confinement clause, which were never true of any tree. This one had a commit where
+  it was right, so it belongs with the cadence failures rather than the derivation ones.
 
   **There were three copies, not one.** `bench/tap_contention.c` and the contended-tap
   comment in `.github/workflows/verify.yml` both said "the per-edit gate is 48 cases in about
