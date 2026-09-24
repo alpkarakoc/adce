@@ -120,7 +120,7 @@
  *
  * ---------------------------------------------------------------------------
  * NOT IN scripts/verify.sh, deliberately. This spawns threads and runs for
- * minutes; the per-edit gate is 48 cases in about five seconds and CLAUDE.md
+ * minutes; the per-edit gate has to stay fast, and CLAUDE.md
  * records that a latency threshold on a shared runner is a flake generator.
  * It lives in bench/ rather than test/ because verify.sh compiles every test source into
  * one binary with one main(), and its ran-tests guard requires every
